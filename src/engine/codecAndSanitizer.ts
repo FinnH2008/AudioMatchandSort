@@ -239,3 +239,93 @@ export function detectPathCollisions(
 
   return result;
 }
+
+/**
+ * Deterministically resolves exact path collisions, SMB case-insensitive collisions,
+ * and overly long paths (> maxPathLength) by shortening long intermediate segments or
+ * appending SMB-safe numeric suffixes " (2)", " (3)", ... without ever overwriting.
+ */
+export function ensureUniqueRelativePaths(
+  plannedPaths: Array<{ id: string; targetRelativePath: string; tooLong: boolean }>,
+  maxPathLength: number,
+  smbCaseSafe: boolean
+): Map<string, { targetRelativePath: string; changed: boolean; tooLong: boolean }> {
+  const resolved = new Map<string, { targetRelativePath: string; changed: boolean; tooLong: boolean }>();
+  const usedExact = new Set<string>();
+  const usedLower = new Set<string>();
+
+  const isTaken = (candidate: string): boolean => {
+    if (usedExact.has(candidate)) return true;
+    if (smbCaseSafe && usedLower.has(candidate.toLowerCase())) return true;
+    return false;
+  };
+
+  const splitPath = (relPath: string): { dir: string; stem: string; ext: string } => {
+    const slashIdx = relPath.lastIndexOf('/');
+    const dir = slashIdx >= 0 ? relPath.slice(0, slashIdx) : '';
+    const file = slashIdx >= 0 ? relPath.slice(slashIdx + 1) : relPath;
+    const dotIdx = file.lastIndexOf('.');
+    if (dotIdx > 0) {
+      return { dir, stem: file.slice(0, dotIdx), ext: file.slice(dotIdx) };
+    }
+    return { dir, stem: file, ext: '' };
+  };
+
+  const fitLength = (dir: string, stem: string, suffix: string, ext: string): string => {
+    const cleanDir = dir;
+    const prefix = cleanDir ? `${cleanDir}/` : '';
+    const allowedStem = maxPathLength - prefix.length - suffix.length - ext.length;
+    if (allowedStem >= 8) {
+      const clippedStem = stem.slice(0, allowedStem).replace(/[. ]+$/g, '') || 'Track';
+      return `${prefix}${clippedStem}${suffix}${ext}`;
+    }
+    // Deep directory chain exceeded maxPathLength (e.g., nested _Review/...): keep root bucket + leaf folder
+    const segs = cleanDir.split('/').filter(Boolean);
+    const compactDir =
+      segs.length >= 3
+        ? `${segs[0]}/${segs[1]}/${segs[segs.length - 1].slice(0, 40)}`
+        : segs.map((s) => s.slice(0, 40)).join('/');
+    const compactPrefix = compactDir ? `${compactDir}/` : '';
+    const compactAllowed = Math.max(8, maxPathLength - compactPrefix.length - suffix.length - ext.length);
+    const clippedStem = stem.slice(0, compactAllowed).replace(/[. ]+$/g, '') || 'Track';
+    return `${compactPrefix}${clippedStem}${suffix}${ext}`;
+  };
+
+  for (const item of plannedPaths) {
+    let candidate = item.targetRelativePath;
+    let changed = false;
+
+    if (item.tooLong || candidate.length > maxPathLength) {
+      const { dir, stem, ext } = splitPath(candidate);
+      candidate = fitLength(dir, stem, '', ext);
+      changed = true;
+    }
+
+    if (isTaken(candidate)) {
+      const { dir, stem, ext } = splitPath(candidate);
+      let counter = 2;
+      while (counter < 10_000) {
+        const nextCandidate = fitLength(dir, stem, ` (${counter})`, ext);
+        if (!isTaken(nextCandidate)) {
+          candidate = nextCandidate;
+          changed = true;
+          break;
+        }
+        counter += 1;
+      }
+    }
+
+    usedExact.add(candidate);
+    if (smbCaseSafe) {
+      usedLower.add(candidate.toLowerCase());
+    }
+    resolved.set(item.id, {
+      targetRelativePath: candidate,
+      changed,
+      tooLong: candidate.length > maxPathLength,
+    });
+  }
+
+  return resolved;
+}
+

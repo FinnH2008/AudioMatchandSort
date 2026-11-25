@@ -24,6 +24,7 @@ import {
   classifyCodecQuality,
   computeAudioQualityScore,
   detectPathCollisions,
+  ensureUniqueRelativePaths,
   isLosslessCodec,
   isWavCodec,
   sanitizeRelativePath,
@@ -890,7 +891,28 @@ export function evaluateLibraryPlan(
     });
   }
 
-  // Run exact & SMB case-insensitive collision detection across all planned paths
+  // Deterministically disambiguate colliding/too-long paths with "(2)", "(3)" suffixes (never overwrite)
+  const uniquePaths = ensureUniqueRelativePaths(
+    rawPlans.map((r) => ({
+      id: r.track.id,
+      targetRelativePath: r.plan.targetRelativePath,
+      tooLong: r.tooLong,
+    })),
+    config.maxPathLength,
+    config.smbCaseSafe
+  );
+  for (const r of rawPlans) {
+    const resolved = uniquePaths.get(r.track.id);
+    if (resolved) {
+      if (resolved.changed) {
+        r.plan.targetRelativePath = resolved.targetRelativePath;
+        r.plan.sanitizedChanged = true;
+      }
+      r.tooLong = resolved.tooLong;
+    }
+  }
+
+  // Run exact & SMB case-insensitive collision detection across all resolved planned paths
   const collisions = detectPathCollisions(
     rawPlans.map((r) => ({
       id: r.track.id,

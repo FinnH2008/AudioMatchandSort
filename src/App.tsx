@@ -196,12 +196,16 @@ export default function App() {
 
   // Connect to real FastAPI Single-Container backend if available (with in-flight mutex)
   const inFlightStateSyncRef = useRef(false);
+  const pendingStateSyncRef = useRef(false);
   const trackCountRef = useRef(0);
   trackCountRef.current = tracks.length;
 
   const checkAndLoadBackend = useCallback(
     async (targetUrl: string, silent = false) => {
-      if (inFlightStateSyncRef.current) return;
+      if (inFlightStateSyncRef.current) {
+        pendingStateSyncRef.current = true;
+        return;
+      }
       inFlightStateSyncRef.current = true;
       setBackendChecking(true);
       try {
@@ -251,9 +255,20 @@ export default function App() {
           if (state.queue) {
             setQueue(state.queue);
           }
-          setMode1Completed(Boolean(state.mode1Completed));
-          setMode2Completed(Boolean(state.mode2Completed));
-          setMode3Completed(Boolean(state.mode3Completed));
+          const qDone = state.queue?.status === 'completed';
+          const qMode = state.queue?.activeMode;
+          setMode1Completed(
+            Boolean(state.mode1Completed) ||
+              Boolean(state.mode2Completed) ||
+              Boolean(state.mode3Completed) ||
+              (qDone && (qMode === 'analyze' || qMode === 'tag' || qMode === 'move'))
+          );
+          setMode2Completed(
+            Boolean(state.mode2Completed) ||
+              Boolean(state.mode3Completed) ||
+              (qDone && (qMode === 'tag' || qMode === 'move'))
+          );
+          setMode3Completed(Boolean(state.mode3Completed) || (qDone && qMode === 'move'));
           setActiveSourceLabel(health.music_dir || '/music');
         }
 
@@ -263,6 +278,10 @@ export default function App() {
       } finally {
         inFlightStateSyncRef.current = false;
         setBackendChecking(false);
+        if (pendingStateSyncRef.current) {
+          pendingStateSyncRef.current = false;
+          void checkAndLoadBackend(targetUrl, true);
+        }
       }
     },
     [revokeCoverUrls, showToast]
@@ -299,6 +318,19 @@ export default function App() {
           liveQueue.status === 'completed' ||
           liveQueue.status === 'idle' ||
           liveQueue.status === 'error';
+
+        if (liveQueue.status === 'completed') {
+          if (liveQueue.activeMode === 'analyze') {
+            setMode1Completed(true);
+          } else if (liveQueue.activeMode === 'tag') {
+            setMode1Completed(true);
+            setMode2Completed(true);
+          } else if (liveQueue.activeMode === 'move') {
+            setMode1Completed(true);
+            setMode2Completed(true);
+            setMode3Completed(true);
+          }
+        }
 
         const now = Date.now();
         const needsInitialTrackLoad =
@@ -783,13 +815,22 @@ export default function App() {
 
     if (nextModeAction.mode === 'move') {
       const { moves, companionMoves } = buildMovePayload();
-      await postBackendAction(backendUrl, '/api/mode/move', {
-        config,
-        moves,
-        companionMoves,
-      });
-      await checkAndLoadBackend(backendUrl, true);
-      showToast('Modus 3 (Atomares Verschieben) über FastAPI-Container abgeschlossen.');
+      const res = await postBackendAction<{ started?: boolean; reason?: string }>(
+        backendUrl,
+        '/api/mode/move',
+        {
+          config,
+          moves,
+          companionMoves,
+        }
+      );
+      if (res && res.started === false) {
+        showToast(res.reason || 'Modus 3 konnte nicht gestartet werden.');
+        return;
+      }
+      const q = await fetchBackendQueue(backendUrl);
+      if (q) setQueue(q);
+      showToast('Modus 3 (Atomares Verschieben) im Docker-Container gestartet.');
       return;
     }
 
@@ -854,9 +895,9 @@ export default function App() {
         tracks: buildTagPayload(pendingReRunTracks),
         moves,
       });
+      await checkAndLoadBackend(backendUrl, true);
       showToast('Gezielter Re-Run (Modus 2 + Modus 3) abgeschlossen.');
     }
-    await checkAndLoadBackend(backendUrl, true);
   };
 
   const handlePauseQueue = () => {
@@ -896,7 +937,22 @@ export default function App() {
     }
 
     if (backendConnected && journal.state === 'interrupted') {
-      await postBackendAction(backendUrl, '/api/mode/move', { resume: true });
+      if (journal.mode === 'tag') {
+        await postBackendAction(backendUrl, '/api/mode/tag', {
+          config,
+          tracks: buildTagPayload(),
+        });
+      } else {
+        const { moves, companionMoves } = buildMovePayload();
+        await postBackendAction(backendUrl, '/api/mode/move', {
+          config,
+          moves,
+          companionMoves,
+          resume: true,
+        });
+      }
+      const q = await fetchBackendQueue(backendUrl);
+      if (q) setQueue(q);
       await checkAndLoadBackend(backendUrl, true);
     }
   };
@@ -1120,6 +1176,7 @@ export default function App() {
               mode1Completed={mode1Completed}
               mode2Completed={mode2Completed}
               mode3Completed={mode3Completed}
+              nextAction={nextModeAction}
               queue={queue}
               journal={journal}
               cache={cache}

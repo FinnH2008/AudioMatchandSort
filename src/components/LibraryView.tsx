@@ -14,6 +14,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { NextModeAction } from '../engine/classifierAndPlanner';
 import { formatCodecLabel } from '../engine/codecAndSanitizer';
 import {
   AnalysisReport,
@@ -48,6 +49,7 @@ interface LibraryViewProps {
   mode1Completed: boolean;
   mode2Completed: boolean;
   mode3Completed: boolean;
+  nextAction: NextModeAction;
   queue: BackgroundQueueState;
   journal: RollbackJournal;
   cache: SqliteCacheState;
@@ -93,6 +95,7 @@ export function LibraryView({
   mode1Completed,
   mode2Completed,
   mode3Completed,
+  nextAction,
   queue,
   journal,
   cache,
@@ -416,7 +419,9 @@ export function LibraryView({
                       ? 'Wartet auf Modus 2'
                       : report.openArtistConflictCount > 0
                         ? `Blockiert (${report.openArtistConflictCount} Konflikte)`
-                        : 'Freigeschaltet'}
+                        : report.pathCollisionCount > 0
+                          ? `Blockiert (${report.pathCollisionCount} Kollisionen)`
+                          : 'Freigeschaltet'}
               </span>
             </div>
             <p className="text-xs text-slate-400">
@@ -425,6 +430,29 @@ export function LibraryView({
             </p>
           </div>
         </div>
+
+        {!nextAction.enabled &&
+          nextAction.blockReason &&
+          nextAction.mode !== 'done' &&
+          tracks.length > 0 &&
+          queue.status !== 'running' &&
+          queue.status !== 'paused' && (
+            <div className="mt-4 pt-3.5 border-t border-[#243044] flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-amber-300">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>{nextAction.blockReason}</span>
+              </div>
+              {report.openArtistConflictCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateSection('artists')}
+                  className="px-3 py-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-200 font-medium hover:border-amber-400 whitespace-nowrap"
+                >
+                  Künstler-Check öffnen →
+                </button>
+              )}
+            </div>
+          )}
       </section>
 
       {/* Background Queue Monitor */}

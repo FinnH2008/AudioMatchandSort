@@ -779,3 +779,103 @@ test('normalizeBackendState + evaluateLibraryPlan survives hostile malformed fie
   );
 });
 
+test('evaluateLibraryPlan auto-disambiguates colliding and overly long paths without overwriting so Mode 3 unlocks cleanly', () => {
+  const deepDir = 'unsorted/very_long_folder_name_01/very_long_folder_name_02/very_long_folder_name_03/very_long_folder_name_04/very_long_folder_name_05/very_long_folder_name_06';
+  const tracks = [
+    // Two identical 320k MP3 copies in _Duplikate/ (plus higher quality original)
+    makeTrack({
+      id: 'dup-orig',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      albumArtist: 'Daft Punk',
+      album: 'Discovery',
+      codec: 'flac',
+      bitDepth: 24,
+      bitrateKbps: 2800,
+      mbRecordingId: 'rec-dup',
+      matchedRelease: REL_DISCOVERY,
+      inMatchedReleaseTracklist: true,
+    }),
+    makeTrack({
+      id: 'dup-mp3-1',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      albumArtist: 'Daft Punk',
+      album: '',
+      isLooseFile: true,
+      codec: 'mp3',
+      extension: '.mp3',
+      bitDepth: null,
+      bitrateKbps: 320,
+      sourceRelativePath: 'loose/a/omt.mp3',
+      mbRecordingId: 'rec-dup',
+    }),
+    makeTrack({
+      id: 'dup-mp3-2',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      albumArtist: 'Daft Punk',
+      album: '',
+      isLooseFile: true,
+      codec: 'mp3',
+      extension: '.mp3',
+      bitDepth: null,
+      bitrateKbps: 320,
+      sourceRelativePath: 'loose/b/omt.mp3',
+      mbRecordingId: 'rec-dup',
+    }),
+    // Extremely deep _Review path (> 220 chars)
+    makeTrack({
+      id: 'too-long-review',
+      title: 'Very Long Unmatched Live Recording Title That Would Exceed Max Path Length',
+      artist: 'Unknown DJ',
+      albumArtist: 'Unknown DJ',
+      album: '',
+      codec: 'mp3',
+      extension: '.mp3',
+      bitDepth: null,
+      bitrateKbps: 192,
+      sourceDir: deepDir,
+      sourceRelativePath: `${deepDir}/very_long_unmatched_live_recording_filename_exceeding_limits.mp3`,
+      acoustidConfidence: 0.4,
+      matchedRelease: null,
+    }),
+  ];
+
+  const plan = evaluateLibraryPlan(
+    tracks,
+    [],
+    [],
+    DEFAULT_CONFIG,
+    { decisions: {}, renamedCanonical: {} },
+    { decisions: {}, selectedOriginals: {} }
+  );
+
+  // Every track must have a unique target path and 0 unresolved collisions
+  assert.equal(plan.report.pathCollisionCount, 0);
+  const targetPaths = tracks.map((t) => plan.trackPlans.get(t.id)!.targetRelativePath);
+  assert.equal(new Set(targetPaths.map((p) => p.toLowerCase())).size, tracks.length);
+  assert.ok(targetPaths.every((p) => p.length <= DEFAULT_CONFIG.maxPathLength));
+
+  const dup1 = plan.trackPlans.get('dup-mp3-1')!.targetRelativePath;
+  const dup2 = plan.trackPlans.get('dup-mp3-2')!.targetRelativePath;
+  assert.notEqual(dup1.toLowerCase(), dup2.toLowerCase());
+  assert.ok(dup2.includes('(2)'), `Expected disambiguated suffix (2) in ${dup2}`);
+
+  const nextAction = computeNextModeAction({
+    mode1Completed: true,
+    mode2Completed: true,
+    mode3Completed: false,
+    openArtistConflictCount: plan.report.openArtistConflictCount,
+    pathCollisionCount: plan.report.pathCollisionCount,
+    pendingReRunCount: 0,
+    queueRunningOrPaused: false,
+    hasInterruptedJournal: false,
+    totalTracks: tracks.length,
+    backendConnected: true,
+  });
+  assert.equal(nextAction.mode, 'move');
+  assert.equal(nextAction.enabled, true);
+});
+
+

@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -1603,7 +1604,10 @@ def write_tags_to_audio_file(
     ext = full_path.suffix.lower()
     is_wav = ext == ".wav"
 
-    easy = MutagenFile(str(full_path), easy=True)
+    try:
+        easy = MutagenFile(str(full_path), easy=True)
+    except Exception as exc:
+        return {"tagged": False, "reason": f"Mutagen-Lesefehler ({ext}): {exc}"}
     if easy is None:
         return {"tagged": False, "reason": f"Nicht unterstuetztes Tag-Format ({ext})"}
 
@@ -1641,7 +1645,10 @@ def write_tags_to_audio_file(
         _set_if_allowed("tracknumber", str(track.get("trackNumber") or ""), True)
         _set_if_allowed("genre", str(track.get("genre") or ""), True)
 
-    easy.save()
+    try:
+        easy.save()
+    except Exception as exc:
+        return {"tagged": False, "reason": f"Mutagen-Speicherfehler ({ext}): {exc}"}
 
     # Cover Art einbetten (WAV nur wenn WAV_EMBED_MEDIA=true)
     cover = track.get("cover") or {}
@@ -2168,12 +2175,27 @@ def _execute_tag_entries(
     return tagged_count, skipped_count
 
 
+def _unique_non_overwriting_path(dst_p: Path) -> Path:
+    """Haengt bei existierender Zieldatei ' (2)', ' (3)' an, statt still zu ueberschreiben."""
+    if not dst_p.exists():
+        return dst_p
+    stem = dst_p.stem
+    suffix = dst_p.suffix
+    parent = dst_p.parent
+    for idx in range(2, 10_000):
+        cand = parent / f"{stem} ({idx}){suffix}"
+        if not cand.exists():
+            return cand
+    return dst_p
+
+
 def _execute_move_entries(
     moves: List[Dict[str, Any]],
     companion_moves: List[Dict[str, Any]],
     cfg: Dict[str, Any],
     mode_name: str,
-) -> Tuple[int, List[str]]:
+    progress_cb: Optional[Callable[[int, int, str, bool], None]] = None,
+) -> Tuple[int, List[str], Dict[str, str]]:
     journal = load_journal()
     now_iso = datetime.now(timezone.utc).isoformat()
     journal["runId"] = f"run-{int(time.time())}"
@@ -2224,22 +2246,47 @@ def _execute_move_entries(
 
     # Write-Ahead-Journal VOR dem ersten os.replace() schreiben
     journal["entries"] = entries
+    journal["lastFsyncIso"] = datetime.now(timezone.utc).isoformat()
     atomic_write_json(JOURNAL_PATH, journal)
 
     moved_count = 0
+    total_ops = len(planned_ops)
     touched_source_dirs: List[Path] = []
-    for entry, src_p, dst_p in planned_ops:
-        if not src_p.exists() or dst_p.exists():
+    actual_track_moves: Dict[str, str] = {}
+
+    for idx, (entry, src_p, dst_p) in enumerate(planned_ops):
+        ok = False
+        try:
+            if not src_p.exists():
+                entry["status"] = "failed"
+            elif src_p.resolve() == dst_p.resolve():
+                entry["status"] = "done"
+                ok = True
+            else:
+                final_dst = _unique_non_overwriting_path(dst_p)
+                final_dst.parent.mkdir(parents=True, exist_ok=True)
+                touched_source_dirs.append(src_p.parent)
+                try:
+                    os.replace(src_p, final_dst)
+                except OSError:
+                    shutil.move(str(src_p), str(final_dst))
+                final_rel = final_dst.relative_to(MUSIC_DIR).as_posix()
+                entry["toPath"] = final_rel
+                entry["status"] = "done"
+                entry["timestampIso"] = datetime.now(timezone.utc).isoformat()
+                moved_count += 1
+                ok = True
+                if entry.get("kind") == "move_track" and entry.get("trackId"):
+                    actual_track_moves[str(entry["trackId"])] = final_rel
+        except Exception:
             entry["status"] = "failed"
-            continue
-        dst_p.parent.mkdir(parents=True, exist_ok=True)
-        touched_source_dirs.append(src_p.parent)
-        os.replace(src_p, dst_p)
-        entry["status"] = "done"
-        entry["timestampIso"] = datetime.now(timezone.utc).isoformat()
-        moved_count += 1
-        journal["lastFsyncIso"] = entry["timestampIso"]
-        atomic_write_json(JOURNAL_PATH, journal)
+
+        if progress_cb:
+            progress_cb(idx + 1, total_ops, str(entry.get("toPath") or entry.get("fromPath") or ""), ok)
+
+        if (idx + 1) % 25 == 0 or (idx + 1) == total_ops:
+            journal["lastFsyncIso"] = datetime.now(timezone.utc).isoformat()
+            atomic_write_json(JOURNAL_PATH, journal)
 
     removed_dirs: List[str] = []
     if cfg.get("cleanupEmptyDirs", True) and touched_source_dirs:
@@ -2251,7 +2298,7 @@ def _execute_move_entries(
     journal["state"] = "completed"
     journal["lastFsyncIso"] = datetime.now(timezone.utc).isoformat()
     atomic_write_json(JOURNAL_PATH, journal)
-    return moved_count, removed_dirs
+    return moved_count, removed_dirs, actual_track_moves
 
 
 class BackupConfirmRequest(BaseModel):
@@ -2373,11 +2420,22 @@ async def api_get_state() -> Dict[str, Any]:
     }
     raw_tracks = list(state.get("tracks") or [])
     compact_tracks = [_compact_track_for_bulk_state(t) for t in raw_tracks if isinstance(t, dict)]
+    raw_journal_entries = journal.get("entries") or []
+    compact_journal_entries = [
+        {
+            "id": e.get("id", ""),
+            "kind": e.get("kind", "tag_track"),
+            "status": e.get("status", "done"),
+        }
+        for e in raw_journal_entries
+        if isinstance(e, dict)
+    ]
+    compact_journal = {**journal, "entries": compact_journal_entries}
     return {
         "tracks": compact_tracks,
         "companions": list(state.get("companions") or []),
         "leftovers": list(state.get("leftovers") or []),
-        "journal": journal,
+        "journal": compact_journal,
         "cache": read_cache_stats(),
         "queue": asdict(queue_state),
         "config": build_server_config(),
@@ -2503,9 +2561,11 @@ async def _run_tag_job(
             if t.get("id") in tagged_ids:
                 t["status"] = "tagged"
                 t["taggedAt"] = now_iso
+        state["mode1Completed"] = True
         state["mode2Completed"] = True
         snapshot = {**state, "tracks": list(persisted_tracks)}
         await asyncio.to_thread(save_persisted_state, snapshot)
+        await asyncio.to_thread(clear_checkpoint, "analyze")
 
         queue_state.status = "completed"
         queue_state.processedCount = total
@@ -2550,16 +2610,100 @@ async def api_mode_tag(req: ModeTagRequest) -> Dict[str, Any]:
     return {"started": True, "mode": "tag", "total": len(target_tracks)}
 
 
+async def _run_move_job(
+    moves: List[Dict[str, Any]],
+    companion_moves: List[Dict[str, Any]],
+    cfg: Dict[str, Any],
+) -> None:
+    global queue_state
+    try:
+        total = len(moves) + (len(companion_moves) if cfg.get("moveCompanionFiles", True) else 0)
+        queue_state = QueueStatus(
+            activeMode="move",
+            status="running" if total > 0 else "completed",
+            processedCount=0,
+            totalCount=total,
+            errorCount=0,
+            cacheHitCount=0,
+            etaSeconds=max(1, total // 40) if total > 0 else 0,
+            currentTrackLabel="Schreibe Write-Ahead-Journal (rollback.json) …",
+            checkpointIndex=0,
+            errors=[],
+        )
+        print(f"[TonArchiv] Modus 3 (Atomares Verschieben) gestartet fuer {total} Dateien.", flush=True)
+
+        def _on_move_progress(done: int, tot: int, label: str, ok: bool) -> None:
+            queue_state.processedCount = done
+            queue_state.totalCount = tot
+            queue_state.checkpointIndex = done
+            queue_state.currentTrackLabel = label
+            queue_state.etaSeconds = max(0, (tot - done) // 40)
+            if not ok:
+                queue_state.errorCount += 1
+                queue_state.errors.append(
+                    {
+                        "id": f"move-err-{done}",
+                        "stage": "Verschieben",
+                        "trackLabel": label,
+                        "message": "Datei nicht gefunden oder konnte nicht verschoben werden.",
+                        "recovered": True,
+                    }
+                )
+                if len(queue_state.errors) > 25:
+                    queue_state.errors = queue_state.errors[-25:]
+            if done % 100 == 0 or done == tot:
+                print(f"[TonArchiv] Modus 3 (Verschieben): {done}/{tot} Dateien.", flush=True)
+
+        moved, removed_dirs, actual_track_moves = await asyncio.to_thread(
+            _execute_move_entries, moves, companion_moves, cfg, "move", _on_move_progress
+        )
+
+        # Pfade direkt im gespeicherten Zustand aktualisieren (kein 2-Minuten-ffprobe-Rescan noetig)
+        state = await asyncio.to_thread(ensure_state_loaded, False)
+        persisted_tracks = state.get("tracks") or []
+        for t in persisted_tracks:
+            tid = str(t.get("id") or "")
+            new_rel = actual_track_moves.get(tid)
+            if new_rel:
+                t["sourceRelativePath"] = new_rel
+                t["movedToPath"] = new_rel
+                t["fileName"] = Path(new_rel).name
+                parent_str = Path(new_rel).parent.as_posix()
+                t["sourceDir"] = "" if parent_str == "." else parent_str
+                t["status"] = "moved"
+        state["mode1Completed"] = True
+        state["mode2Completed"] = True
+        state["mode3Completed"] = True
+        snapshot = {**state, "tracks": list(persisted_tracks)}
+        await asyncio.to_thread(save_persisted_state, snapshot)
+
+        queue_state.status = "completed"
+        queue_state.processedCount = total
+        queue_state.etaSeconds = 0
+        queue_state.currentTrackLabel = ""
+        print(
+            f"[TonArchiv] Modus 3 abgeschlossen (verschoben: {moved}, leere Ordner entfernt: {len(removed_dirs)}).",
+            flush=True,
+        )
+    except Exception as exc:
+        queue_state.status = "error"
+        queue_state.currentTrackLabel = f"Verschiebe-Fehler: {exc}"
+        print(f"[TonArchiv] Fehler in Modus 3: {exc}", flush=True)
+
+
 @app.post("/api/mode/move")
-def api_mode_move(req: ModeMoveRequest) -> Dict[str, Any]:
+async def api_mode_move(req: ModeMoveRequest) -> Dict[str, Any]:
+    global active_task
+    if active_task and not active_task.done():
+        return {
+            "started": False,
+            "reason": "Eine Hintergrund-Aufgabe laeuft bereits",
+            "queue": asdict(queue_state),
+        }
     cfg = {**build_server_config(), **(req.config or {})}
-    moved, removed_dirs = _execute_move_entries(req.moves, req.companionMoves, cfg, "move")
-    state = ensure_state_loaded(force_rescan=True)
-    state["mode1Completed"] = True
-    state["mode2Completed"] = True
-    state["mode3Completed"] = True
-    save_persisted_state(state)
-    return {"completed": True, "moved": moved, "removedEmptyDirs": removed_dirs}
+    pause_event.set()
+    active_task = asyncio.create_task(_run_move_job(req.moves, req.companionMoves, cfg))
+    return {"started": True, "mode": "move", "total": len(req.moves)}
 
 
 @app.post("/api/mode/rerun")
@@ -2568,8 +2712,19 @@ def api_mode_rerun(req: ModeRerunRequest) -> Dict[str, Any]:
     existing = load_persisted_state() or {}
     merged_tracks = _merge_persisted_lyrics(req.tracks, existing.get("tracks") or [])
     tagged, skipped = _execute_tag_entries(merged_tracks, cfg, "rerun")
-    moved, removed_dirs = _execute_move_entries(req.moves, [], cfg, "rerun")
-    state = ensure_state_loaded(force_rescan=True)
+    moved, removed_dirs, actual_track_moves = _execute_move_entries(req.moves, [], cfg, "rerun")
+    state = ensure_state_loaded(force_rescan=False)
+    for t in state.get("tracks") or []:
+        tid = str(t.get("id") or "")
+        if tid in actual_track_moves:
+            new_rel = actual_track_moves[tid]
+            t["sourceRelativePath"] = new_rel
+            t["movedToPath"] = new_rel
+            t["fileName"] = Path(new_rel).name
+            parent_str = Path(new_rel).parent.as_posix()
+            t["sourceDir"] = "" if parent_str == "." else parent_str
+            t["status"] = "moved"
+            t["pendingReRunTagAndMove"] = False
     state["mode1Completed"] = True
     state["mode2Completed"] = True
     state["mode3Completed"] = True
