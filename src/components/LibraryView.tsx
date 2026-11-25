@@ -13,7 +13,7 @@ import {
   Server,
   Trash2,
 } from 'lucide-react';
-import { ChangeEvent, useRef } from 'react';
+import { ChangeEvent, useEffect, useRef, useState } from 'react';
 import { formatCodecLabel } from '../engine/codecAndSanitizer';
 import {
   AnalysisReport,
@@ -53,6 +53,7 @@ interface LibraryViewProps {
   backendConnected: boolean;
   backendUrl: string;
   backendChecking: boolean;
+  musicDirExists: boolean | null;
   importingFiles: boolean;
   importProgressLabel: string;
   activeSourceLabel: string | null;
@@ -60,6 +61,7 @@ interface LibraryViewProps {
   activeFilter: LibraryFilterId;
   onBackendUrlChange: (url: string) => void;
   onCheckBackend: () => void;
+  onStartBackendScan: () => void;
   onImportLocalFiles: (files: FileList) => void;
   onClearLoadedLibrary: () => void;
   onSearchChange: (q: string) => void;
@@ -95,6 +97,7 @@ export function LibraryView({
   backendConnected,
   backendUrl,
   backendChecking,
+  musicDirExists,
   importingFiles,
   importProgressLabel,
   activeSourceLabel,
@@ -102,6 +105,7 @@ export function LibraryView({
   activeFilter,
   onBackendUrlChange,
   onCheckBackend,
+  onStartBackendScan,
   onImportLocalFiles,
   onClearLoadedLibrary,
   onSearchChange,
@@ -116,6 +120,11 @@ export function LibraryView({
 }: LibraryViewProps) {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const filesInputRef = useRef<HTMLInputElement | null>(null);
+  const [visibleCount, setVisibleCount] = useState(100);
+
+  useEffect(() => {
+    setVisibleCount(100);
+  }, [activeFilter, searchQuery]);
 
   const hasCrashRecovery =
     journal.state === 'interrupted' || cache.interruptedAnalyzeCheckpoint !== null;
@@ -158,16 +167,18 @@ export function LibraryView({
     const q = searchQuery.trim().toLowerCase();
     if (!q) return true;
     return (
-      track.title.toLowerCase().includes(q) ||
-      track.artist.toLowerCase().includes(q) ||
-      plan.resolvedAlbumArtist.toLowerCase().includes(q) ||
-      track.album.toLowerCase().includes(q) ||
-      track.fileName.toLowerCase().includes(q) ||
-      track.codec.toLowerCase().includes(q) ||
-      track.camelotKey.toLowerCase().includes(q) ||
-      plan.targetRelativePath.toLowerCase().includes(q)
+      String(track.title ?? '').toLowerCase().includes(q) ||
+      String(track.artist ?? '').toLowerCase().includes(q) ||
+      String(plan.resolvedAlbumArtist ?? '').toLowerCase().includes(q) ||
+      String(track.album ?? '').toLowerCase().includes(q) ||
+      String(track.fileName ?? '').toLowerCase().includes(q) ||
+      String(track.codec ?? '').toLowerCase().includes(q) ||
+      String(track.camelotKey ?? '').toLowerCase().includes(q) ||
+      String(plan.targetRelativePath ?? '').toLowerCase().includes(q)
     );
   });
+
+  const visibleTracks = filteredTracks.slice(0, visibleCount);
 
   const filterButtons: Array<{ id: LibraryFilterId; label: string; count: number }> = [
     { id: 'all', label: 'Alle', count: report.totalAudioTracks },
@@ -285,9 +296,9 @@ export function LibraryView({
               >
                 {mode1Completed
                   ? 'Abgeschlossen'
-                  : queue.activeMode === 'analyze'
+                  : queue.activeMode === 'analyze' && queue.status === 'running'
                     ? 'Läuft'
-                    : tracks.length > 0
+                    : tracks.length > 0 || backendConnected
                       ? 'Bereit (Read-Only)'
                       : 'Keine Dateien'}
               </span>
@@ -609,6 +620,89 @@ export function LibraryView({
 
       {/* Production Data Source Empty State OR Active Library Table */}
       {tracks.length === 0 ? (
+        backendConnected ? (
+          <section
+            aria-label="Container bereit — Analyse manuell starten"
+            className="bg-[#151E2E] border border-[#243044] rounded-lg p-6 space-y-5"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2.5 text-slate-100">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-400 shrink-0" />
+                  <h2 className="font-display text-base font-semibold">
+                    TonArchiv läuft &amp; ist bereit
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
+                  Die Oberfläche und das FastAPI-Backend laufen stabil. Es wurden noch keine
+                  Dateien gescannt oder verändert — du kannst hier prüfen, ob dein Musikordner
+                  erkannt wurde, und Modus 1 (rein lesend) starten, sobald du bereit bist.
+                </p>
+              </div>
+              <span className="font-mono text-xs text-emerald-400">Backend online</span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-b border-[#243044] py-4 text-xs">
+              <div className="space-y-1">
+                <div className="text-slate-400">Musikordner im Container</div>
+                <div className="font-mono text-slate-100 break-all">
+                  {config.containerMusicDir}
+                </div>
+                <div
+                  className={`font-mono ${
+                    musicDirExists === false ? 'text-red-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {musicDirExists === false
+                    ? 'Nicht gefunden — HOST_MUSIC_DIR prüfen'
+                    : 'Erkannt & lesbar'}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="text-slate-400">Metadaten-Dienste</div>
+                <div className="text-slate-200">MusicBrainz · Cover Art · LRCLIB</div>
+                <div className="font-mono text-slate-400">
+                  AcoustID: {config.acoustidKeyConfigured ? 'aktiv' : 'optional'} · Discogs:{' '}
+                  {config.discogsTokenConfigured ? 'aktiv' : 'optional'}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="text-slate-400">Sicherheitsmodus</div>
+                <div className="text-slate-200">Modus 1 ist 100 % Read-Only</div>
+                <div className="font-mono text-slate-400">
+                  Config-Volume: {config.configDir}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={onStartBackendScan}
+                disabled={queue.status === 'running' || musicDirExists === false}
+                className="inline-flex items-center gap-2 px-4 py-2.5 min-h-[42px] rounded-md bg-sky-400 text-slate-950 text-xs font-semibold hover:bg-sky-300 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+              >
+                <Play className="h-4 w-4" />
+                <span>
+                  {queue.status === 'running'
+                    ? 'Scan / Modus 1 läuft …'
+                    : 'Modus 1: Bibliothek jetzt scannen & analysieren'}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={onCheckBackend}
+                disabled={backendChecking}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 min-h-[42px] rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 text-xs font-medium hover:border-sky-400 whitespace-nowrap"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${backendChecking ? 'animate-spin' : ''}`} />
+                <span>{backendChecking ? 'Prüfe …' : 'Status neu prüfen'}</span>
+              </button>
+            </div>
+          </section>
+        ) : (
         <section
           aria-label="Produktionsdaten laden"
           className="grid grid-cols-1 lg:grid-cols-2 gap-6"
@@ -715,6 +809,7 @@ export function LibraryView({
             </div>
           </div>
         </section>
+        )
       ) : (
         <>
           {/* Active Production Source Strip */}
@@ -814,8 +909,10 @@ export function LibraryView({
               <>
                 {/* Mobile Touch-First Track Card List */}
                 <div className="md:hidden divide-y divide-[#243044]">
-                  {filteredTracks.map((track) => {
-                    const plan = trackPlans.get(track.id)!;
+                  {visibleTracks.map((track) => {
+                    const plan = trackPlans.get(track.id);
+                    if (!plan) return null;
+                    const confidencePct = Math.round((track.acoustidConfidence ?? 0) * 100);
                     const statusText =
                       track.status === 'moved'
                         ? 'Verschoben'
@@ -835,7 +932,7 @@ export function LibraryView({
                         : plan.classification === 'review_no_release_match'
                           ? 'Review (kein Release-Match)'
                           : plan.classification === 'review_low_confidence'
-                            ? `Review (${Math.round(track.acoustidConfidence * 100)} %)`
+                            ? `Review (${confidencePct} %)`
                             : plan.albumQuality === 'lossless'
                               ? 'Lossless-Album'
                               : plan.albumQuality === 'lossy_low'
@@ -880,7 +977,7 @@ export function LibraryView({
                             <span className="text-slate-600">·</span>
                             <span className="font-mono tabular-nums text-slate-400">
                               {track.bitDepth ? `${track.bitDepth}b/` : ''}
-                              {(track.sampleRateHz / 1000).toFixed(1)}k · {track.bitrateKbps}k
+                              {((track.sampleRateHz || 44100) / 1000).toFixed(1)}k · {track.bitrateKbps || 0}k
                             </span>
                             <span className="text-slate-600">·</span>
                             <span className={classColor}>{classLabel}</span>
@@ -913,8 +1010,9 @@ export function LibraryView({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#243044]">
-                    {filteredTracks.map((track) => {
-                      const plan = trackPlans.get(track.id)!;
+                    {visibleTracks.map((track) => {
+                      const plan = trackPlans.get(track.id);
+                      if (!plan) return null;
                       const keyLabel =
                         track.camelotKey && track.camelotKey !== '—'
                           ? track.musicalKey && track.musicalKey !== track.camelotKey
@@ -952,7 +1050,7 @@ export function LibraryView({
                             </div>
                             <div className="font-mono tabular-nums text-slate-400 truncate mt-0.5">
                               {track.bitDepth ? `${track.bitDepth}b/` : ''}
-                              {(track.sampleRateHz / 1000).toFixed(1)}k · {track.bitrateKbps} kbps
+                              {((track.sampleRateHz || 44100) / 1000).toFixed(1)}k · {track.bitrateKbps || 0} kbps
                             </div>
                             {track.spectralWarningOnly &&
                               config.enableEssentia &&
@@ -971,12 +1069,12 @@ export function LibraryView({
                             <div className="text-slate-400 truncate mt-0.5">
                               {plan.wavMediaSkipped
                                 ? 'WAV-Schutz: Cover/Lyrics aus'
-                                : `Cover ${track.cover.status === 'missing' ? 'Fehlt' : track.cover.resolution} · ${
-                                    track.lyrics.status === 'synced'
+                                : `Cover ${!track.cover || track.cover.status === 'missing' ? 'Fehlt' : track.cover.resolution} · ${
+                                    track.lyrics?.status === 'synced'
                                       ? 'Sync LRC'
-                                      : track.lyrics.status === 'plain'
+                                      : track.lyrics?.status === 'plain'
                                         ? 'Text'
-                                        : track.lyrics.status === 'instrumental'
+                                        : track.lyrics?.status === 'instrumental'
                                           ? 'Instrumental'
                                           : 'Ohne Lyrics'
                                   }`}
@@ -1057,6 +1155,20 @@ export function LibraryView({
                   </tbody>
                 </table>
               </div>
+              {filteredTracks.length > visibleTracks.length && (
+                <div className="px-4 py-3.5 border-t border-[#243044] bg-[#111927] flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <span className="font-mono text-slate-400 tabular-nums">
+                    Zeige {visibleTracks.length} von {filteredTracks.length} Tracks
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setVisibleCount((prev) => prev + 100)}
+                    className="px-4 py-2 min-h-[40px] rounded-md border border-[#243044] bg-[#0F172A] text-sky-300 font-medium hover:border-sky-400 whitespace-nowrap"
+                  >
+                    Weitere 100 Tracks laden
+                  </button>
+                </div>
+              )}
               </>
             )}
           </section>

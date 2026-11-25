@@ -68,8 +68,8 @@ export const PROTECTED_MBID_ARTISTS: ReadonlyMap<
  * Strips diacritics, normalizes Unicode NFC/NFD, collapses whitespace, and lowercases
  * for exact normalization comparisons (never fuzzy).
  */
-export function normalizeArtistExact(name: string): string {
-  return name
+export function normalizeArtistExact(name: string | null | undefined): string {
+  return String(name ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .normalize('NFC')
@@ -85,7 +85,7 @@ export function normalizeArtistExact(name: string): string {
  * 3. Preserves "Various Artists" for compilations.
  */
 export function extractCanonicalAlbumArtist(
-  rawAlbumArtist: string,
+  rawAlbumArtist: string | null | undefined,
   mbArtistId: string | null,
   isCompilation: boolean
 ): {
@@ -93,7 +93,7 @@ export function extractCanonicalAlbumArtist(
   wasProtectedBand: boolean;
   strippedFeature: boolean;
 } {
-  const trimmed = rawAlbumArtist.normalize('NFC').trim();
+  const trimmed = String(rawAlbumArtist ?? '').normalize('NFC').trim();
   if (
     isCompilation ||
     normalizeArtistExact(trimmed) === 'various artists' ||
@@ -181,6 +181,9 @@ export function computeArtistSimilarity(a: string, b: string): number {
   if (!na || !nb) return 0;
   if (na === nb) return 1;
   const maxLen = Math.max(na.length, nb.length);
+  if (Math.abs(na.length - nb.length) / maxLen > 0.35 && !na.includes(nb) && !nb.includes(na)) {
+    return 0;
+  }
   const dist = levenshteinDistance(na, nb);
   const levSim = 1 - dist / maxLen;
 
@@ -236,7 +239,7 @@ export function buildArtistClusters(
   const allGroups: RawGroup[] = [];
 
   for (const track of tracks) {
-    const rawAlbumArtist = track.albumArtist || track.originalTags.albumArtist || track.artist;
+    const rawAlbumArtist = track.albumArtist || track.originalTags?.albumArtist || track.artist || '';
     const extracted = extractCanonicalAlbumArtist(
       rawAlbumArtist,
       track.mbArtistId,
@@ -431,15 +434,20 @@ export function buildArtistClusters(
     });
   }
 
+  const trackById = new Map<string, AudioTrack>();
+  for (const t of tracks) {
+    trackById.set(t.id, t);
+  }
+
   const trackCanonicalArtist = new Map<string, string>();
   const trackHasOpenConflict = new Map<string, boolean>();
 
   for (const cluster of clusters) {
     for (const trackId of cluster.trackIds) {
-      const track = tracks.find((t) => t.id === trackId);
+      const track = trackById.get(trackId);
       if (cluster.status === 'split_kept' && track) {
         const extracted = extractCanonicalAlbumArtist(
-          track.albumArtist || track.originalTags.albumArtist,
+          track.albumArtist || track.originalTags?.albumArtist || track.artist || '',
           track.mbArtistId,
           track.compilationFlag
         );

@@ -87,6 +87,7 @@ export default function App() {
   const [backendUrl, setBackendUrl] = useState('');
   const [backendConnected, setBackendConnected] = useState(false);
   const [backendChecking, setBackendChecking] = useState(false);
+  const [musicDirExists, setMusicDirExists] = useState<boolean | null>(null);
   const [importingFiles, setImportingFiles] = useState(false);
   const [importProgressLabel, setImportProgressLabel] = useState('');
   const [activeSourceLabel, setActiveSourceLabel] = useState<string | null>(null);
@@ -149,6 +150,7 @@ export default function App() {
       const health = await fetchBackendHealth(targetUrl);
       if (!health) {
         setBackendConnected(false);
+        setMusicDirExists(null);
         setBackendChecking(false);
         if (!silent) {
           showToast(
@@ -159,6 +161,7 @@ export default function App() {
       }
 
       setBackendConnected(true);
+      setMusicDirExists(health.music_dir_exists ?? null);
       if (targetUrl.trim() && typeof window !== 'undefined') {
         try {
           window.localStorage.setItem('tonarchiv:backendUrl', targetUrl.trim());
@@ -850,6 +853,7 @@ export default function App() {
               backendConnected={backendConnected}
               backendUrl={backendUrl}
               backendChecking={backendChecking}
+              musicDirExists={musicDirExists}
               importingFiles={importingFiles}
               importProgressLabel={importProgressLabel}
               activeSourceLabel={activeSourceLabel}
@@ -857,6 +861,7 @@ export default function App() {
               activeFilter={activeFilter}
               onBackendUrlChange={setBackendUrl}
               onCheckBackend={() => void checkAndLoadBackend(backendUrl, false)}
+              onStartBackendScan={() => void handleTriggerPrimaryAction()}
               onImportLocalFiles={(files) => void handleImportLocalFiles(files)}
               onClearLoadedLibrary={handleClearLoadedLibrary}
               onSearchChange={setSearchQuery}

@@ -33,12 +33,12 @@ const REMIX_TITLE_KEYWORD_REGEX = /\b(remix|edit|bootleg|mashup)\b/i;
 const REMIX_ALBUM_KEYWORD_REGEX = /\b(remix|remixed|remixes|club edition|club mixes)\b/i;
 const COMPILATION_ALBUM_KEYWORD_REGEX = /\b(hits|sampler|various|best of|compilation|charts)\b/i;
 
-export function hasRemixKeyword(text: string): boolean {
-  return REMIX_TITLE_KEYWORD_REGEX.test(text);
+export function hasRemixKeyword(text: string | null | undefined): boolean {
+  return REMIX_TITLE_KEYWORD_REGEX.test(String(text ?? ''));
 }
 
-export function normalizeTitleForMatch(title: string): string {
-  return title
+export function normalizeTitleForMatch(title: string | null | undefined): string {
+  return String(title ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
@@ -51,11 +51,11 @@ export function normalizeTitleForMatch(title: string): string {
  * (per Rule 3: album contains "Hits", "Sampler", "Various" OR >= 4 distinct track artists).
  */
 export function isCompilationAlbumGroup(albumName: string, tracks: AudioTrack[]): boolean {
-  if (COMPILATION_ALBUM_KEYWORD_REGEX.test(albumName)) {
+  if (COMPILATION_ALBUM_KEYWORD_REGEX.test(String(albumName ?? ''))) {
     return true;
   }
   const distinctArtists = new Set(
-    tracks.map((t) => normalizeArtistExact(t.artist || t.originalTags.artist)).filter(Boolean)
+    tracks.map((t) => normalizeArtistExact(t.artist || t.originalTags?.artist || '')).filter(Boolean)
   );
   if (distinctArtists.size >= 4) {
     return true;
@@ -63,7 +63,7 @@ export function isCompilationAlbumGroup(albumName: string, tracks: AudioTrack[])
   return tracks.some(
     (t) =>
       t.compilationFlag ||
-      normalizeArtistExact(t.albumArtist || t.originalTags.albumArtist) === 'various artists'
+      normalizeArtistExact(t.albumArtist || t.originalTags?.albumArtist || '') === 'various artists'
   );
 }
 
@@ -77,7 +77,7 @@ export function selectBestAlbumRelease(
   albumTracks: AudioTrack[],
   candidates: AlbumReleaseCandidate[]
 ): AlbumReleaseCandidate | null {
-  if (candidates.length === 0) return null;
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
   const expectCompilation = isCompilationAlbumGroup(albumName, albumTracks);
 
   const filtered = expectCompilation
@@ -88,12 +88,12 @@ export function selectBestAlbumRelease(
   if (pool.length === 0) return null;
 
   const scored = pool.map((release) => {
-    let score = release.matchScore;
+    let score = typeof release.matchScore === 'number' ? release.matchScore : 0.85;
     if (!expectCompilation) {
-      if (release.format.toLowerCase().includes('single')) score -= 0.35;
+      if (String(release.format ?? '').toLowerCase().includes('single')) score -= 0.35;
       if (release.isCompilation) score -= 0.4;
     }
-    const trackDiff = Math.abs(release.trackCount - albumTracks.length);
+    const trackDiff = Math.abs((release.trackCount || 1) - albumTracks.length);
     const maxPenalty = expectCompilation ? 0.12 : 0.22;
     score -= Math.min(maxPenalty, trackDiff * 0.02);
     return { release, score };
@@ -107,25 +107,49 @@ export function selectBestAlbumRelease(
 /**
  * Checks whether a track exists in the matched release's tracklist
  * (normalized title + optional position + duration ±3 s).
+ * Tolerates both structured tracklist objects and legacy plain-string entries from older state.json files.
  */
 export function isTrackInReleaseTracklist(
   track: AudioTrack,
   release: AlbumReleaseCandidate | null
 ): { matched: boolean; position: number | null } {
-  if (!release) return { matched: false, position: null };
-  const normTrackTitle = normalizeTitleForMatch(track.title || track.originalTags.title);
-  const trackPos = Number.parseInt(track.trackNumber, 10);
+  if (!release || !Array.isArray(release.tracklist)) return { matched: false, position: null };
+  const normTrackTitle = normalizeTitleForMatch(track.title || track.originalTags?.title || '');
+  const trackPos = Number.parseInt(String(track.trackNumber ?? ''), 10);
 
-  for (const item of release.tracklist) {
-    const normItemTitle = normalizeTitleForMatch(item.title);
-    const durationOk = Math.abs(item.durationSec - track.durationSec) <= 3;
+  for (let idx = 0; idx < release.tracklist.length; idx++) {
+    const rawItem = release.tracklist[idx] as
+      | { position?: number; title?: string; durationSec?: number }
+      | string
+      | null
+      | undefined;
+    if (!rawItem) continue;
+
+    const itemTitle = typeof rawItem === 'string' ? rawItem : String(rawItem.title ?? '');
+    const itemPos =
+      typeof rawItem === 'string'
+        ? idx + 1
+        : typeof rawItem.position === 'number'
+          ? rawItem.position
+          : idx + 1;
+    const itemDuration =
+      typeof rawItem === 'string' || typeof rawItem.durationSec !== 'number'
+        ? null
+        : rawItem.durationSec;
+
+    const normItemTitle = normalizeTitleForMatch(itemTitle);
+    if (!normItemTitle || !normTrackTitle) continue;
+
+    const durationOk =
+      itemDuration === null || itemDuration <= 0 || Math.abs(itemDuration - (track.durationSec || 0)) <= 3;
     const titleOk =
       normItemTitle === normTrackTitle ||
       normItemTitle.includes(normTrackTitle) ||
       normTrackTitle.includes(normItemTitle);
-    const posOk = Number.isNaN(trackPos) || trackPos === item.position;
+    const posOk =
+      typeof rawItem === 'string' || Number.isNaN(trackPos) || trackPos === itemPos;
     if (titleOk && durationOk && posOk) {
-      return { matched: true, position: item.position };
+      return { matched: true, position: itemPos };
     }
   }
   return { matched: false, position: null };
@@ -141,12 +165,12 @@ export function isWholeRemixAlbum(
   matchedRelease: AlbumReleaseCandidate | null
 ): boolean {
   if (!matchedRelease) return false;
-  if (matchedRelease.isRemixAlbum || REMIX_ALBUM_KEYWORD_REGEX.test(albumName)) {
+  if (matchedRelease.isRemixAlbum || REMIX_ALBUM_KEYWORD_REGEX.test(String(albumName ?? ''))) {
     return true;
   }
   if (albumTracks.length === 0) return false;
   const remixCount = albumTracks.filter((t) =>
-    hasRemixKeyword(t.title || t.originalTags.title)
+    hasRemixKeyword(t.title || t.originalTags?.title || '')
   ).length;
   return remixCount / albumTracks.length > 0.5;
 }
@@ -157,16 +181,16 @@ export function isWholeRemixAlbum(
 export function countCompleteTags(track: AudioTrack): number {
   const t = track.originalTags;
   let score = 0;
-  if (t.artist.trim()) score++;
-  if (t.albumArtist.trim()) score++;
-  if (t.title.trim()) score++;
-  if (t.album.trim()) score++;
-  if (t.year.trim()) score++;
-  if (t.trackNumber.trim()) score++;
-  if (t.genre.trim()) score++;
-  if (t.key.trim()) score++;
-  if (t.bpm !== null) score++;
-  if (track.cover.embeddedBefore) score++;
+  if (t?.artist?.trim()) score++;
+  if (t?.albumArtist?.trim()) score++;
+  if (t?.title?.trim()) score++;
+  if (t?.album?.trim()) score++;
+  if (t?.year?.trim()) score++;
+  if (t?.trackNumber?.trim()) score++;
+  if (t?.genre?.trim()) score++;
+  if (t?.key?.trim()) score++;
+  if (t?.bpm !== null && t?.bpm !== undefined) score++;
+  if (track.cover?.embeddedBefore) score++;
   return score;
 }
 

@@ -282,6 +282,56 @@ def load_journal() -> Dict[str, Any]:
         }
 
 
+def _normalize_release_obj(rel: Any, fallback_duration: int = 0) -> Optional[Dict[str, Any]]:
+    if not isinstance(rel, dict):
+        return None
+    normalized = dict(rel)
+    if normalized.get("matchScore") is None:
+        normalized["matchScore"] = 0.85
+    if not normalized.get("format"):
+        normalized["format"] = "Digital Media"
+    raw_tl = normalized.get("tracklist")
+    fixed_tl: List[Dict[str, Any]] = []
+    if isinstance(raw_tl, list):
+        for i, item in enumerate(raw_tl, start=1):
+            if isinstance(item, dict):
+                fixed_tl.append(
+                    {
+                        "position": int(item.get("position") or i),
+                        "title": str(item.get("title") or ""),
+                        "durationSec": int(item.get("durationSec") or fallback_duration or 0),
+                    }
+                )
+            elif isinstance(item, str):
+                fixed_tl.append(
+                    {
+                        "position": i,
+                        "title": item,
+                        "durationSec": int(fallback_duration or 0),
+                    }
+                )
+    normalized["tracklist"] = fixed_tl
+    return normalized
+
+
+def _normalize_state_compat(data: Dict[str, Any]) -> Dict[str, Any]:
+    tracks = data.get("tracks")
+    if isinstance(tracks, list):
+        for t in tracks:
+            if not isinstance(t, dict):
+                continue
+            dur = int(t.get("durationSec") or 0)
+            if t.get("matchedRelease"):
+                t["matchedRelease"] = _normalize_release_obj(t["matchedRelease"], dur)
+            if isinstance(t.get("availableReleases"), list):
+                t["availableReleases"] = [
+                    r
+                    for r in (_normalize_release_obj(x, dur) for x in t["availableReleases"])
+                    if r is not None
+                ]
+    return data
+
+
 def load_persisted_state() -> Optional[Dict[str, Any]]:
     global _STATE_CACHE
     if _STATE_CACHE is not None:
@@ -291,8 +341,8 @@ def load_persisted_state() -> Optional[Dict[str, Any]]:
     try:
         data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            _STATE_CACHE = data
-            return data
+            _STATE_CACHE = _normalize_state_compat(data)
+            return _STATE_CACHE
         return None
     except Exception:
         return None
@@ -1057,6 +1107,8 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
             rg = rel.get("release-group") or {}
             sec_types = [s.lower() for s in (rg.get("secondary-types") or [])]
             is_comp = "compilation" in sec_types
+            raw_pos = track.get("matchedReleaseTrackPos")
+            track_pos = int(raw_pos) if isinstance(raw_pos, int) and raw_pos > 0 else 1
             rel_obj = {
                 "releaseId": rel_id,
                 "title": rel_title,
@@ -1067,7 +1119,14 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
                 "trackCount": int(rel.get("track-count") or 1),
                 "isCompilation": is_comp,
                 "isRemixAlbum": "remix" in sec_types or "remix" in rel_title.lower(),
-                "tracklist": [mb_title],
+                "matchScore": score_norm,
+                "tracklist": [
+                    {
+                        "position": track_pos,
+                        "title": mb_title,
+                        "durationSec": int(track.get("durationSec") or 0),
+                    }
+                ],
             }
             available_releases.append(rel_obj)
 
@@ -1454,9 +1513,22 @@ async def _run_analyze_job(
                 checkpointIndex=start_index,
                 errors=[],
             )
-            state = await asyncio.to_thread(
-                ensure_state_loaded, start_index == 0, _update_scan_progress
-            )
+            existing_state = await asyncio.to_thread(load_persisted_state)
+            if existing_state and len(existing_state.get("tracks") or []) > 0:
+                state = existing_state
+                if start_index == 0:
+                    cp_stats = await asyncio.to_thread(read_cache_stats)
+                    cp_idx = cp_stats.get("interruptedAnalyzeCheckpoint")
+                    if isinstance(cp_idx, int) and 0 < cp_idx < len(state.get("tracks") or []):
+                        start_index = cp_idx
+                        print(
+                            f"[TonArchiv] Setze gespeicherten Analyse-Fortschritt ab Track #{start_index} fort.",
+                            flush=True,
+                        )
+            else:
+                state = await asyncio.to_thread(
+                    ensure_state_loaded, True, _update_scan_progress
+                )
 
         tracks: List[Dict[str, Any]] = state.get("tracks") or []
 
@@ -1473,7 +1545,7 @@ async def _run_analyze_job(
             errors=[],
         )
 
-        print(f"[TonArchiv] Modus 1 (Read-Only Analyse) gestartet fuer {len(tracks)} Tracks.", flush=True)
+        print(f"[TonArchiv] Modus 1 (Read-Only Analyse) gestartet fuer {len(tracks)} Tracks (ab #{start_index}).", flush=True)
 
         for idx in range(start_index, len(tracks)):
             await pause_event.wait()
@@ -1499,7 +1571,7 @@ async def _run_analyze_job(
                     }
                 )
             await asyncio.to_thread(save_checkpoint, "analyze", idx + 1, len(tracks))
-            if (idx + 1) % 25 == 0 or idx + 1 == len(tracks):
+            if (idx + 1) % 10 == 0 or idx + 1 == len(tracks):
                 state["tracks"] = tracks
                 await asyncio.to_thread(save_persisted_state, state)
                 print(
@@ -1957,7 +2029,7 @@ def api_rollback() -> Dict[str, Any]:
 
 
 # Statisches React-Dashboard direkt aus FastAPI ausliefern
-STATIC_DIR = Path("/app/static")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 if STATIC_DIR.exists():
     assets_dir = STATIC_DIR / "assets"
     if assets_dir.exists():

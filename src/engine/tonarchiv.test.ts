@@ -597,3 +597,44 @@ test('Compilation release matcher searches exclusively compilation releases and 
   assert.ok(readme.includes('MusicBrainz Picard'));
   assert.ok(readme.includes('beets'));
 });
+
+test('Legacy backend state payload with string tracklist entries and missing matchScore evaluates safely without throwing', () => {
+  const legacyRelease = {
+    releaseId: 'rel-legacy-1',
+    title: 'Discovery',
+    albumArtist: 'Daft Punk',
+    year: '2001',
+    country: 'XW',
+    format: 'Digital Media',
+    trackCount: 14,
+    isCompilation: false,
+    isRemixAlbum: false,
+    // Deliberately malformed legacy backend format (string[] instead of object[], missing matchScore)
+    tracklist: ['One More Time'],
+  } as unknown as AlbumReleaseCandidate;
+
+  const track = makeTrack({
+    id: 'legacy-1',
+    title: 'One More Time',
+    artist: 'Daft Punk',
+    albumArtist: 'Daft Punk',
+    album: 'Discovery',
+    matchedRelease: legacyRelease,
+    availableReleases: [legacyRelease],
+    inMatchedReleaseTracklist: true,
+    acoustidConfidence: 0.95,
+    mbRecordingId: 'rec-1',
+  });
+
+  const res = evaluateLibraryPlan(
+    [track],
+    [],
+    [],
+    DEFAULT_CONFIG,
+    { decisions: {}, renamedCanonical: {} },
+    { decisions: {}, selectedOriginals: {} }
+  );
+
+  assert.equal(res.trackPlans.get('legacy-1')?.classification, 'album_track');
+  assert.ok(res.trackPlans.get('legacy-1')?.targetRelativePath.startsWith('Lossless/Daft Punk/'));
+});
