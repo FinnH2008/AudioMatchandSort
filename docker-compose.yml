@@ -5,18 +5,43 @@ services:
       dockerfile: Dockerfile
       args:
         INSTALL_ESSENTIA: "${ENABLE_ESSENTIA:-false}"
-    image: tonarchiv:latest
+    pull_policy: build
     container_name: tonarchiv
     restart: unless-stopped
     ports:
       - "${TONARCHIV_PORT:-7070}:7070"
-    env_file:
-      - .env
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
       MUSIC_DIR: "${MUSIC_DIR:-/srv/Music Full Quality}"
       CONFIG_DIR: "${CONFIG_DIR:-/config}"
+      ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"
+      DISCOGS_TOKEN: "${DISCOGS_TOKEN:-}"
+      MUSICBRAINZ_CONTACT: "${MUSICBRAINZ_CONTACT:-}"
+      ENABLE_SHAZAMIO: "${ENABLE_SHAZAMIO:-true}"
+      ENABLE_ESSENTIA: "${ENABLE_ESSENTIA:-false}"
+      CONFIDENCE_THRESHOLD: "${CONFIDENCE_THRESHOLD:-0.80}"
+      MIN_LOSSY_BITRATE: "${MIN_LOSSY_BITRATE:-256}"
+      SEPARATE_LOW_QUALITY_LOSSY: "${SEPARATE_LOW_QUALITY_LOSSY:-true}"
+      MIXED_ALBUM_STRATEGY: "${MIXED_ALBUM_STRATEGY:-lowest_quality}"
+      DJ_REMIX_LAYOUT: "${DJ_REMIX_LAYOUT:-root_folder}"
+      ENRICH_REMIX_EMPTY_FIELDS: "${ENRICH_REMIX_EMPTY_FIELDS:-true}"
+      KEEP_REVIEW_IN_PLACE: "${KEEP_REVIEW_IN_PLACE:-false}"
+      KEY_FORMAT: "${KEY_FORMAT:-both}"
+      EMBED_COVER: "${EMBED_COVER:-true}"
+      COVER_MAX_SIZE: "${COVER_MAX_SIZE:-1000}"
+      SAVE_FOLDER_COVER_JPG: "${SAVE_FOLDER_COVER_JPG:-true}"
+      OVERWRITE_EXISTING_COVER: "${OVERWRITE_EXISTING_COVER:-false}"
+      FETCH_LYRICS: "${FETCH_LYRICS:-true}"
+      PREFER_SYNCED_LRC: "${PREFER_SYNCED_LRC:-true}"
+      EMBED_LYRICS_IN_FILE: "${EMBED_LYRICS_IN_FILE:-true}"
+      WRITE_LRC_SIDECAR: "${WRITE_LRC_SIDECAR:-false}"
+      WRITE_REPLAYGAIN: "${WRITE_REPLAYGAIN:-true}"
+      WAV_EMBED_MEDIA: "${WAV_EMBED_MEDIA:-false}"
+      SMB_CASE_SAFE: "${SMB_CASE_SAFE:-true}"
+      MAX_PATH_LENGTH: "${MAX_PATH_LENGTH:-240}"
+      MOVE_COMPANION_FILES: "${MOVE_COMPANION_FILES:-true}"
+      CLEANUP_EMPTY_DIRS: "${CLEANUP_EMPTY_DIRS:-true}"
     volumes:
       # WICHTIG: Genau ein einzelner Mount fuer atomares Verschieben im selben Dateisystem
       - "${HOST_MUSIC_DIR:-/srv/Music Full Quality}:${MUSIC_DIR:-/srv/Music Full Quality}"

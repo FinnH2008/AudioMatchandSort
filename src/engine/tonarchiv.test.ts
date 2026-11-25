@@ -551,6 +551,8 @@ test('Compilation release matcher searches exclusively compilation releases and 
   assert.equal(bundle.length, 6);
   const compose = bundle.find((f) => f.filename === 'docker-compose.yml')!.content;
   assert.ok(compose.includes('${TONARCHIV_PORT:-7070}:7070'));
+  assert.ok(compose.includes('pull_policy: build'));
+  assert.equal(compose.includes('env_file:'), false);
   const dockerfile = bundle.find((f) => f.filename === 'Dockerfile')!.content;
   assert.ok(dockerfile.includes('EXPOSE 7070'));
   assert.ok(dockerfile.includes('--port 7070'));

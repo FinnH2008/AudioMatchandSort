@@ -16,43 +16,44 @@ export function generateDockerBundle(config: PipelineConfig): GeneratedDockerFil
       context: .
       dockerfile: Dockerfile
       args:
-        INSTALL_ESSENTIA: "${config.enableEssentia ? 'true' : 'false'}"
-    image: tonarchiv:latest
+        INSTALL_ESSENTIA: "\${ENABLE_ESSENTIA:-${config.enableEssentia ? 'true' : 'false'}}"
+    pull_policy: build
     container_name: tonarchiv
     restart: unless-stopped
     ports:
       - "\${TONARCHIV_PORT:-7070}:7070"
-    env_file:
-      - .env
     environment:
       PUID: "\${PUID:-${config.puid}}"
       PGID: "\${PGID:-${config.pgid}}"
-      MUSIC_DIR: "${config.containerMusicDir}"
-      CONFIG_DIR: "${config.configDir}"
-      CONFIDENCE_THRESHOLD: "${config.confidenceThreshold.toFixed(2)}"
-      MIN_LOSSY_BITRATE: "${config.minLossyBitrateKbps}"
-      SEPARATE_LOW_QUALITY_LOSSY: "${config.separateLowQualityLossy ? 'true' : 'false'}"
-      MIXED_ALBUM_STRATEGY: "${config.mixedAlbumStrategy}"
-      DJ_REMIX_LAYOUT: "${djLayoutEnv}"
-      ENRICH_REMIX_EMPTY_FIELDS: "${config.enrichRemixEmptyFields ? 'true' : 'false'}"
-      KEEP_REVIEW_IN_PLACE: "${config.keepReviewTracksInPlace ? 'true' : 'false'}"
-      ENABLE_SHAZAMIO: "${config.enableShazamFallback ? 'true' : 'false'}"
-      ENABLE_ESSENTIA: "${config.enableEssentia ? 'true' : 'false'}"
-      WAV_EMBED_MEDIA: "${config.wavEmbedMedia ? 'true' : 'false'}"
-      KEY_FORMAT: "${config.keyFormat}"
-      COVER_MAX_SIZE: "${config.coverMaxSize}"
-      SAVE_FOLDER_COVER_JPG: "${config.saveFolderCoverJpg ? 'true' : 'false'}"
-      FETCH_LYRICS: "${config.fetchLyrics ? 'true' : 'false'}"
-      WRITE_LRC_SIDECAR: "${config.writeLrcSidecar ? 'true' : 'false'}"
-      WRITE_REPLAYGAIN: "${config.writeReplayGain ? 'true' : 'false'}"
-      SMB_CASE_SAFE: "${config.smbCaseSafe ? 'true' : 'false'}"
-      MAX_PATH_LENGTH: "${config.maxPathLength}"
-      CLEANUP_EMPTY_DIRS: "${config.cleanupEmptyDirs ? 'true' : 'false'}"
+      MUSIC_DIR: "\${MUSIC_DIR:-${config.containerMusicDir}}"
+      CONFIG_DIR: "\${CONFIG_DIR:-${config.configDir}}"
+      ACOUSTID_API_KEY: "\${ACOUSTID_API_KEY:-}"
+      DISCOGS_TOKEN: "\${DISCOGS_TOKEN:-}"
+      MUSICBRAINZ_CONTACT: "\${MUSICBRAINZ_CONTACT:-}"
+      CONFIDENCE_THRESHOLD: "\${CONFIDENCE_THRESHOLD:-${config.confidenceThreshold.toFixed(2)}}"
+      MIN_LOSSY_BITRATE: "\${MIN_LOSSY_BITRATE:-${config.minLossyBitrateKbps}}"
+      SEPARATE_LOW_QUALITY_LOSSY: "\${SEPARATE_LOW_QUALITY_LOSSY:-${config.separateLowQualityLossy ? 'true' : 'false'}}"
+      MIXED_ALBUM_STRATEGY: "\${MIXED_ALBUM_STRATEGY:-${config.mixedAlbumStrategy}}"
+      DJ_REMIX_LAYOUT: "\${DJ_REMIX_LAYOUT:-${djLayoutEnv}}"
+      ENRICH_REMIX_EMPTY_FIELDS: "\${ENRICH_REMIX_EMPTY_FIELDS:-${config.enrichRemixEmptyFields ? 'true' : 'false'}}"
+      KEEP_REVIEW_IN_PLACE: "\${KEEP_REVIEW_IN_PLACE:-${config.keepReviewTracksInPlace ? 'true' : 'false'}}"
+      ENABLE_SHAZAMIO: "\${ENABLE_SHAZAMIO:-${config.enableShazamFallback ? 'true' : 'false'}}"
+      ENABLE_ESSENTIA: "\${ENABLE_ESSENTIA:-${config.enableEssentia ? 'true' : 'false'}}"
+      WAV_EMBED_MEDIA: "\${WAV_EMBED_MEDIA:-${config.wavEmbedMedia ? 'true' : 'false'}}"
+      KEY_FORMAT: "\${KEY_FORMAT:-${config.keyFormat}}"
+      COVER_MAX_SIZE: "\${COVER_MAX_SIZE:-${config.coverMaxSize}}"
+      SAVE_FOLDER_COVER_JPG: "\${SAVE_FOLDER_COVER_JPG:-${config.saveFolderCoverJpg ? 'true' : 'false'}}"
+      FETCH_LYRICS: "\${FETCH_LYRICS:-${config.fetchLyrics ? 'true' : 'false'}}"
+      WRITE_LRC_SIDECAR: "\${WRITE_LRC_SIDECAR:-${config.writeLrcSidecar ? 'true' : 'false'}}"
+      WRITE_REPLAYGAIN: "\${WRITE_REPLAYGAIN:-${config.writeReplayGain ? 'true' : 'false'}}"
+      SMB_CASE_SAFE: "\${SMB_CASE_SAFE:-${config.smbCaseSafe ? 'true' : 'false'}}"
+      MAX_PATH_LENGTH: "\${MAX_PATH_LENGTH:-${config.maxPathLength}}"
+      CLEANUP_EMPTY_DIRS: "\${CLEANUP_EMPTY_DIRS:-${config.cleanupEmptyDirs ? 'true' : 'false'}}"
     volumes:
       # WICHTIG: Genau ein einzelner Mount fuer atomares Verschieben im selben Dateisystem
-      - "\${HOST_MUSIC_DIR:-${config.hostMusicDir}}:${config.containerMusicDir}"
+      - "\${HOST_MUSIC_DIR:-${config.hostMusicDir}}:\${MUSIC_DIR:-${config.containerMusicDir}}"
       # Persistente SQLite-Cache-DB (cache.db) und atomares Journal (rollback.json)
-      - "\${HOST_CONFIG_DIR:-./config}:${config.configDir}"
+      - "\${HOST_CONFIG_DIR:-./config}:\${CONFIG_DIR:-${config.configDir}}"
 `;
 
   const dockerfile = `# Stage 1: Statisches React-Frontend bauen (direkt aus GitHub-Repo baubar)
