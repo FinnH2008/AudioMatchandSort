@@ -34,6 +34,7 @@ from urllib.parse import quote
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -217,7 +218,7 @@ AUDIO_EXTS = {
 VIDEO_EXTS = {".mkv", ".avi", ".mov", ".webm", ".wmv", ".m4v", ".ts", ".mpeg", ".mpg"}
 COMPANION_EXTS = {".jpg", ".jpeg", ".png", ".cue", ".log", ".m3u", ".m3u8", ".pdf"}
 
-app = FastAPI(title="TonArchiv", version="1.1.0")
+app = FastAPI(title="TonArchiv", version="1.2.0")
 
 cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
@@ -227,6 +228,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+_HTTP_SESSION = requests.Session()
 
 
 # ---------------------------------------------------------------------------
@@ -314,22 +318,130 @@ def _normalize_release_obj(rel: Any, fallback_duration: int = 0) -> Optional[Dic
     return normalized
 
 
+def _normalize_track_obj(t: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(t, dict) or not t.get("id"):
+        return None
+    dur = int(t.get("durationSec") or 0)
+    orig = t.get("originalTags")
+    if not isinstance(orig, dict):
+        orig = {}
+    cov = t.get("cover")
+    if not isinstance(cov, dict):
+        cov = {}
+    lyr = t.get("lyrics")
+    if not isinstance(lyr, dict):
+        lyr = {}
+
+    t["sourceRelativePath"] = str(t.get("sourceRelativePath") or t.get("fileName") or "")
+    t["sourceDir"] = str(t.get("sourceDir") or "")
+    t["fileName"] = str(t.get("fileName") or Path(t["sourceRelativePath"]).name or "Unbekannt")
+    ext = str(t.get("extension") or Path(t["fileName"]).suffix or ".mp3").lower()
+    t["extension"] = ext if ext.startswith(".") else f".{ext}"
+    t["codec"] = str(t.get("codec") or "mp3").lower()
+    t["sizeBytes"] = int(t.get("sizeBytes") or 0)
+    t["mtimeIso"] = str(t.get("mtimeIso") or "1970-01-01T00:00:00+00:00")
+    t["durationSec"] = dur
+    t["bitrateKbps"] = int(t.get("bitrateKbps") or 0)
+    t["sampleRateHz"] = int(t.get("sampleRateHz") or 44100)
+    t["artist"] = str(t.get("artist") or orig.get("artist") or "Unbekannter Kuenstler")
+    t["albumArtist"] = str(t.get("albumArtist") or orig.get("albumArtist") or t["artist"])
+    t["title"] = str(t.get("title") or orig.get("title") or Path(t["fileName"]).stem)
+    t["album"] = str(t.get("album") or orig.get("album") or "")
+    t["year"] = str(t.get("year") or orig.get("year") or "")
+    t["trackNumber"] = str(t.get("trackNumber") or orig.get("trackNumber") or "")
+    t["genre"] = str(t.get("genre") or orig.get("genre") or "")
+    t["isrc"] = str(t.get("isrc") or "")
+    t["compilationFlag"] = bool(t.get("compilationFlag"))
+    t["acoustidConfidence"] = float(t.get("acoustidConfidence") or 0.0)
+    t["activeSource"] = str(t.get("activeSource") or "musicbrainz")
+    t["sourceCandidates"] = t.get("sourceCandidates") if isinstance(t.get("sourceCandidates"), list) else []
+    t["musicalKey"] = str(t.get("musicalKey") or "—")
+    t["camelotKey"] = str(t.get("camelotKey") or "—")
+    t["manualAssignment"] = str(t.get("manualAssignment") or "none")
+    t["status"] = str(t.get("status") or "pending")
+    t["originalTags"] = {
+        "artist": str(orig.get("artist") or ""),
+        "albumArtist": str(orig.get("albumArtist") or ""),
+        "title": str(orig.get("title") or ""),
+        "album": str(orig.get("album") or ""),
+        "year": str(orig.get("year") or ""),
+        "trackNumber": str(orig.get("trackNumber") or ""),
+        "genre": str(orig.get("genre") or ""),
+        "key": str(orig.get("key") or ""),
+        "bpm": orig.get("bpm") if isinstance(orig.get("bpm"), (int, float)) else None,
+        "compilation": bool(orig.get("compilation")),
+    }
+    t["cover"] = {
+        "status": str(cov.get("status") or "missing"),
+        "source": str(cov.get("source") or "Keine"),
+        "resolution": str(cov.get("resolution") or "—"),
+        "sizeKb": int(cov.get("sizeKb") or 0),
+        "embeddedBefore": bool(cov.get("embeddedBefore")),
+        "imageUrl": cov.get("imageUrl"),
+        "fallbackGradient": str(cov.get("fallbackGradient") or "from-slate-800 to-slate-900"),
+    }
+    t["lyrics"] = {
+        "status": str(lyr.get("status") or "missing"),
+        "source": str(lyr.get("source") or "Keine"),
+        "syncedLrc": str(lyr.get("syncedLrc") or ""),
+        "plainText": str(lyr.get("plainText") or ""),
+    }
+    if t.get("matchedRelease"):
+        t["matchedRelease"] = _normalize_release_obj(t["matchedRelease"], dur)
+    else:
+        t["matchedRelease"] = None
+    if isinstance(t.get("availableReleases"), list):
+        t["availableReleases"] = [
+            r
+            for r in (_normalize_release_obj(x, dur) for x in t["availableReleases"])
+            if r is not None
+        ]
+    else:
+        t["availableReleases"] = []
+    return t
+
+
 def _normalize_state_compat(data: Dict[str, Any]) -> Dict[str, Any]:
     tracks = data.get("tracks")
     if isinstance(tracks, list):
+        normalized_tracks = []
         for t in tracks:
-            if not isinstance(t, dict):
-                continue
-            dur = int(t.get("durationSec") or 0)
-            if t.get("matchedRelease"):
-                t["matchedRelease"] = _normalize_release_obj(t["matchedRelease"], dur)
-            if isinstance(t.get("availableReleases"), list):
-                t["availableReleases"] = [
-                    r
-                    for r in (_normalize_release_obj(x, dur) for x in t["availableReleases"])
-                    if r is not None
-                ]
+            nt = _normalize_track_obj(t)
+            if nt is not None:
+                normalized_tracks.append(nt)
+        data["tracks"] = normalized_tracks
+    else:
+        data["tracks"] = []
+    if not isinstance(data.get("companions"), list):
+        data["companions"] = []
+    if not isinstance(data.get("leftovers"), list):
+        data["leftovers"] = []
     return data
+
+
+def _compact_track_for_bulk_state(t: Dict[str, Any]) -> Dict[str, Any]:
+    """Kuerzt schwere Text-Blobs (Lyrics-Volltext, ueberzaehlige Releases) fuer schnelles /api/state auf Mobilgeraeten."""
+    lyr = t.get("lyrics") if isinstance(t.get("lyrics"), dict) else {}
+    avail = t.get("availableReleases") if isinstance(t.get("availableReleases"), list) else []
+    compact_avail = [
+        {**r, "tracklist": (r.get("tracklist") or [])[:5]}
+        for r in avail[:3]
+        if isinstance(r, dict)
+    ]
+    matched = t.get("matchedRelease")
+    if isinstance(matched, dict):
+        matched = {**matched, "tracklist": (matched.get("tracklist") or [])[:25]}
+    return {
+        **t,
+        "matchedRelease": matched,
+        "availableReleases": compact_avail,
+        "lyrics": {
+            "status": lyr.get("status", "missing"),
+            "source": lyr.get("source", "Keine"),
+            "syncedLrc": "",
+            "plainText": "",
+        },
+    }
 
 
 def load_persisted_state() -> Optional[Dict[str, Any]]:
@@ -974,13 +1086,21 @@ def _compute_fpcalc(path: Path) -> Optional[Tuple[int, str]]:
 
 
 def _http_get_json(url: str, headers: Dict[str, str], timeout: int = 12) -> Optional[Dict[str, Any]]:
-    try:
-        resp = requests.get(url, headers=headers, timeout=timeout)
-        if resp.status_code != 200:
+    for attempt in range(2):
+        try:
+            resp = _HTTP_SESSION.get(url, headers=headers, timeout=timeout)
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code in (429, 503) and attempt == 0:
+                time.sleep(1.5)
+                continue
             return None
-        return resp.json()
-    except Exception:
-        return None
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            return None
+    return None
 
 
 async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], bool, Optional[str]]:
@@ -1198,7 +1318,7 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
             caa_url = f"https://coverartarchive.org/release/{rel_id}/front-500"
             try:
                 head_res = await asyncio.to_thread(
-                    requests.head, caa_url, allow_redirects=True, timeout=8
+                    _HTTP_SESSION.head, caa_url, allow_redirects=True, timeout=8
                 )
                 if head_res.status_code == 200:
                     cache_put("cover", rel_id, {"url": head_res.url})
@@ -1570,18 +1690,22 @@ async def _run_analyze_job(
                         "recovered": True,
                     }
                 )
+                if len(queue_state.errors) > 25:
+                    queue_state.errors = queue_state.errors[-25:]
             await asyncio.to_thread(save_checkpoint, "analyze", idx + 1, len(tracks))
-            if (idx + 1) % 10 == 0 or idx + 1 == len(tracks):
+            if (idx + 1) % 25 == 0 or idx + 1 == len(tracks):
                 state["tracks"] = tracks
-                await asyncio.to_thread(save_persisted_state, state)
+                snapshot = {**state, "tracks": list(tracks)}
+                await asyncio.to_thread(save_persisted_state, snapshot)
                 print(
-                    f"[TonArchiv] Analyse: {idx + 1}/{len(tracks)} Tracks (Cache-Hits: {queue_state.cacheHitCount})",
+                    f"[TonArchiv] Analyse: {idx + 1}/{len(tracks)} Tracks (Cache-Hits: {queue_state.cacheHitCount}, Hinweise: {queue_state.errorCount})",
                     flush=True,
                 )
 
         state["tracks"] = tracks
         state["mode1Completed"] = True
-        await asyncio.to_thread(save_persisted_state, state)
+        snapshot = {**state, "tracks": list(tracks)}
+        await asyncio.to_thread(save_persisted_state, snapshot)
         await asyncio.to_thread(clear_checkpoint, "analyze")
 
         queue_state.status = "completed"
@@ -1899,10 +2023,12 @@ async def api_get_state() -> Dict[str, Any]:
         "mode2Completed": False,
         "mode3Completed": False,
     }
+    raw_tracks = list(state.get("tracks") or [])
+    compact_tracks = [_compact_track_for_bulk_state(t) for t in raw_tracks if isinstance(t, dict)]
     return {
-        "tracks": state.get("tracks") or [],
-        "companions": state.get("companions") or [],
-        "leftovers": state.get("leftovers") or [],
+        "tracks": compact_tracks,
+        "companions": list(state.get("companions") or []),
+        "leftovers": list(state.get("leftovers") or []),
         "journal": journal,
         "cache": read_cache_stats(),
         "queue": asdict(queue_state),
@@ -1915,6 +2041,17 @@ async def api_get_state() -> Dict[str, Any]:
     }
 
 
+@app.get("/api/tracks/{track_id}")
+async def api_get_track_detail(track_id: str) -> Dict[str, Any]:
+    state = load_persisted_state()
+    if not state:
+        raise HTTPException(status_code=404, detail="Kein Zustand geladen.")
+    for t in state.get("tracks") or []:
+        if isinstance(t, dict) and t.get("id") == track_id:
+            return t
+    raise HTTPException(status_code=404, detail=f"Track {track_id} nicht gefunden.")
+
+
 @app.post("/api/mode/analyze")
 async def api_mode_analyze(req: ModeAnalyzeRequest) -> Dict[str, Any]:
     global active_task
@@ -1925,16 +2062,43 @@ async def api_mode_analyze(req: ModeAnalyzeRequest) -> Dict[str, Any]:
     return {"started": True, "mode": "analyze"}
 
 
+def _merge_persisted_lyrics(
+    incoming_tracks: List[Dict[str, Any]], persisted_tracks: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    by_id = {t.get("id"): t for t in persisted_tracks if isinstance(t, dict) and t.get("id")}
+    merged: List[Dict[str, Any]] = []
+    for item in incoming_tracks:
+        if not isinstance(item, dict):
+            continue
+        persisted = by_id.get(item.get("id"))
+        lyr = item.get("lyrics") if isinstance(item.get("lyrics"), dict) else {}
+        if (
+            persisted
+            and isinstance(persisted.get("lyrics"), dict)
+            and not lyr.get("syncedLrc")
+            and not lyr.get("plainText")
+            and lyr.get("status") != "instrumental"
+        ):
+            item = {**item, "lyrics": persisted["lyrics"]}
+        merged.append(item)
+    return merged
+
+
 @app.post("/api/mode/tag")
 def api_mode_tag(req: ModeTagRequest) -> Dict[str, Any]:
     cfg = {**build_server_config(), **(req.config or {})}
     state = ensure_state_loaded(force_rescan=False)
-    target_tracks = req.tracks if req.tracks is not None else (state.get("tracks") or [])
+    persisted_tracks = state.get("tracks") or []
+    target_tracks = (
+        _merge_persisted_lyrics(req.tracks, persisted_tracks)
+        if req.tracks is not None
+        else persisted_tracks
+    )
     tagged, skipped = _execute_tag_entries(target_tracks, cfg, "tag")
 
     now_iso = datetime.now(timezone.utc).isoformat()
     tagged_ids = {t.get("id") for t in target_tracks}
-    for t in state.get("tracks") or []:
+    for t in persisted_tracks:
         if t.get("id") in tagged_ids:
             t["status"] = "tagged"
             t["taggedAt"] = now_iso
@@ -1958,7 +2122,9 @@ def api_mode_move(req: ModeMoveRequest) -> Dict[str, Any]:
 @app.post("/api/mode/rerun")
 def api_mode_rerun(req: ModeRerunRequest) -> Dict[str, Any]:
     cfg = {**build_server_config(), **(req.config or {})}
-    tagged, skipped = _execute_tag_entries(req.tracks, cfg, "rerun")
+    existing = load_persisted_state() or {}
+    merged_tracks = _merge_persisted_lyrics(req.tracks, existing.get("tracks") or [])
+    tagged, skipped = _execute_tag_entries(merged_tracks, cfg, "rerun")
     moved, removed_dirs = _execute_move_entries(req.moves, [], cfg, "rerun")
     state = ensure_state_loaded(force_rescan=True)
     state["mode1Completed"] = True
@@ -2042,4 +2208,7 @@ if STATIC_DIR.exists():
         candidate = STATIC_DIR / full_path
         if full_path and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(
+            STATIC_DIR / "index.html",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )

@@ -157,22 +157,78 @@ export function extractCanonicalAlbumArtist(
 }
 
 /**
- * Standard Levenshtein distance for conservative fuzzy duplicate suggestions (never auto-merged).
+ * Fast 1D-buffer Levenshtein distance with optional maxDist early exit (zero 2D matrix allocations).
  */
-export function levenshteinDistance(a: string, b: string): number {
+export function levenshteinDistance(a: string, b: string, maxDist?: number): number {
   const m = a.length;
   const n = b.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array<number>(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  if (maxDist !== undefined && Math.abs(m - n) > maxDist) {
+    return maxDist + 1;
+  }
+
+  let prev = new Int32Array(n + 1);
+  let curr = new Int32Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
 
   for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    const chA = a.charCodeAt(i - 1);
     for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+      const cost = chA === b.charCodeAt(j - 1) ? 0 : 1;
+      const del = prev[j] + 1;
+      const ins = curr[j - 1] + 1;
+      const sub = prev[j - 1] + cost;
+      const best = del < ins ? (del < sub ? del : sub) : ins < sub ? ins : sub;
+      curr[j] = best;
+      if (best < rowMin) rowMin = best;
+    }
+    if (maxDist !== undefined && rowMin > maxDist) {
+      return maxDist + 1;
+    }
+    const tmp = prev;
+    prev = curr;
+    curr = tmp;
+  }
+  return prev[n];
+}
+
+function computeArtistSimilarityPrecomputed(
+  na: string,
+  tokensA: string[],
+  setA: ReadonlySet<string>,
+  nb: string,
+  tokensB: string[],
+  setB: ReadonlySet<string>
+): number {
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const maxLen = Math.max(na.length, nb.length);
+
+  // Token containment for prefix/suffix variants like "DJ Tiesto" vs "Tiesto"
+  const minTokens = Math.min(setA.size, setB.size);
+  let tokenContainSim = 0;
+  if (minTokens > 0 && Math.max(setA.size, setB.size) <= minTokens + 1) {
+    let intersection = 0;
+    for (let k = 0; k < tokensA.length; k++) {
+      if (setB.has(tokensA[k])) intersection++;
+    }
+    if (intersection === minTokens) {
+      tokenContainSim = 0.84;
     }
   }
-  return dp[m][n];
+
+  if (Math.abs(na.length - nb.length) / maxLen > 0.25) {
+    return tokenContainSim;
+  }
+
+  const maxAllowedDist = Math.ceil(maxLen * 0.25);
+  const dist = levenshteinDistance(na, nb, maxAllowedDist);
+  const levSim = dist > maxAllowedDist ? 0 : 1 - dist / maxLen;
+
+  return Number(Math.max(levSim, tokenContainSim).toFixed(3));
 }
 
 export function computeArtistSimilarity(a: string, b: string): number {
@@ -180,26 +236,16 @@ export function computeArtistSimilarity(a: string, b: string): number {
   const nb = normalizeArtistExact(b).replace(/[^a-z0-9 ]/g, '').trim();
   if (!na || !nb) return 0;
   if (na === nb) return 1;
-  const maxLen = Math.max(na.length, nb.length);
-  if (Math.abs(na.length - nb.length) / maxLen > 0.35 && !na.includes(nb) && !nb.includes(na)) {
-    return 0;
-  }
-  const dist = levenshteinDistance(na, nb);
-  const levSim = 1 - dist / maxLen;
-
-  // Token containment for prefix/suffix variants like "DJ Tiesto" vs "Tiesto"
   const tokensA = na.split(' ').filter(Boolean);
   const tokensB = nb.split(' ').filter(Boolean);
-  const setA = new Set(tokensA);
-  const setB = new Set(tokensB);
-  const intersection = tokensA.filter((t) => setB.has(t)).length;
-  const minTokens = Math.min(setA.size, setB.size);
-  const tokenContainSim =
-    minTokens > 0 && intersection === minTokens && Math.max(setA.size, setB.size) <= minTokens + 1
-      ? 0.84
-      : 0;
-
-  return Number(Math.max(levSim, tokenContainSim).toFixed(3));
+  return computeArtistSimilarityPrecomputed(
+    na,
+    tokensA,
+    new Set(tokensA),
+    nb,
+    tokensB,
+    new Set(tokensB)
+  );
 }
 
 export interface ArtistResolutionOverrides {
@@ -331,6 +377,46 @@ export function buildArtistClusters(
     allGroups.push(group);
   }
 
+  // Precompute normalized forms & candidate inverted index (tokens + prefix/suffix/3-grams)
+  // so fuzzy matching stays near-linear even for 2,000+ unique artists on mobile devices.
+  const precomputed = allGroups.map((g) => {
+    const exact = normalizeArtistExact(g.canonicalName);
+    const clean = exact.replace(/[^a-z0-9 ]/g, '').trim();
+    const tokens = clean ? clean.split(' ').filter(Boolean) : [];
+    const tokenSet = new Set(tokens);
+    return { exact, clean, tokens, tokenSet };
+  });
+
+  const candidateIndex = new Map<string, number[]>();
+  const addKey = (k: string, idx: number) => {
+    let bucket = candidateIndex.get(k);
+    if (!bucket) {
+      bucket = [];
+      candidateIndex.set(k, bucket);
+    }
+    // Cap ultra-generic buckets (e.g. "the", "dj") to prevent quadratic blow-up
+    if (bucket.length < 80) {
+      bucket.push(idx);
+    }
+  };
+
+  for (let i = 0; i < allGroups.length; i++) {
+    const g = allGroups[i];
+    if (g.isCompilation || g.wasProtectedBand) continue;
+    const { clean, tokens } = precomputed[i];
+    if (!clean) continue;
+    addKey(`c:${clean}`, i);
+    for (const tok of tokens) {
+      if (tok.length >= 2) addKey(`t:${tok}`, i);
+    }
+    const compact = clean.replace(/\s+/g, '');
+    if (compact.length >= 3) {
+      const half = Math.floor(compact.length / 2);
+      addKey(`p:${compact.slice(0, Math.min(4, Math.max(2, half)))}`, i);
+      addKey(`s:${compact.slice(-Math.min(4, Math.max(2, compact.length - half)))}`, i);
+    }
+  }
+
   // Detect conservative fuzzy pairs (ONLY between groups that did NOT already merge via MBID/exact)
   // NEVER auto-merges: strictly creates a needs_review suggestion!
   const consumedIntoFuzzy = new Set<string>();
@@ -341,20 +427,51 @@ export function buildArtistClusters(
     if (consumedIntoFuzzy.has(gA.key)) continue;
 
     if (!gA.isCompilation && !gA.wasProtectedBand) {
+      const pA = precomputed[i];
       let fuzzyPartner: RawGroup | null = null;
       let bestSim = 0;
 
-      for (let j = i + 1; j < allGroups.length; j++) {
+      // Gather only indexed candidate partner indices j > i
+      const candidateSet = new Set<number>();
+      if (pA.clean) {
+        const collect = (k: string) => {
+          const list = candidateIndex.get(k);
+          if (!list) return;
+          for (let b = 0; b < list.length; b++) {
+            const j = list[b];
+            if (j > i) candidateSet.add(j);
+          }
+        };
+        collect(`c:${pA.clean}`);
+        for (const tok of pA.tokens) {
+          if (tok.length >= 2) collect(`t:${tok}`);
+        }
+        const compact = pA.clean.replace(/\s+/g, '');
+        if (compact.length >= 3) {
+          const half = Math.floor(compact.length / 2);
+          collect(`p:${compact.slice(0, Math.min(4, Math.max(2, half)))}`);
+          collect(`s:${compact.slice(-Math.min(4, Math.max(2, compact.length - half)))}`);
+        }
+      }
+
+      for (const j of candidateSet) {
         const gB = allGroups[j];
         if (consumedIntoFuzzy.has(gB.key) || gB.isCompilation || gB.wasProtectedBand) continue;
         // If both have DIFFERENT confirmed MBIDs, they are distinct artists — never suggest merge
         if (gA.mbArtistId && gB.mbArtistId && gA.mbArtistId !== gB.mbArtistId) continue;
 
-        const sim = computeArtistSimilarity(gA.canonicalName, gB.canonicalName);
-        // Punctuation/spelling difference like "Fred again.." vs "Fred Again" or "Tiesto" vs "Tiësto" without MBID match
-        const exactDifferent =
-          normalizeArtistExact(gA.canonicalName) !== normalizeArtistExact(gB.canonicalName);
-        if (exactDifferent && sim >= 0.78 && sim > bestSim) {
+        const pB = precomputed[j];
+        if (pA.exact === pB.exact) continue;
+
+        const sim = computeArtistSimilarityPrecomputed(
+          pA.clean,
+          pA.tokens,
+          pA.tokenSet,
+          pB.clean,
+          pB.tokens,
+          pB.tokenSet
+        );
+        if (sim >= 0.78 && sim > bestSim) {
           bestSim = sim;
           fuzzyPartner = gB;
         }

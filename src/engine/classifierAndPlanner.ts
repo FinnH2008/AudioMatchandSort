@@ -221,8 +221,8 @@ export function compareDuplicateCandidates(
     return { winner: a.sizeBytes > b.sizeBytes ? a : b, reason: 'larger_file_size' };
   }
 
-  const mtimeA = Date.parse(a.mtimeIso);
-  const mtimeB = Date.parse(b.mtimeIso);
+  const mtimeA = Date.parse(a.mtimeIso || '') || 0;
+  const mtimeB = Date.parse(b.mtimeIso || '') || 0;
   return { winner: mtimeA <= mtimeB ? a : b, reason: 'older_mtime' };
 }
 
@@ -264,7 +264,7 @@ export function classifyAllTracks(
   const albumGroups = new Map<string, AudioTrack[]>();
   for (const track of tracks) {
     if (track.isLooseFile) continue;
-    const key = `${normalizeTitleForMatch(track.album || track.originalTags.album)}::${track.sourceDir}`;
+    const key = `${normalizeTitleForMatch(track.album || track.originalTags?.album)}::${track.sourceDir || ''}`;
     const list = albumGroups.get(key) ?? [];
     list.push(track);
     albumGroups.set(key, list);
@@ -275,7 +275,7 @@ export function classifyAllTracks(
     // Pick matched release from tracks in this group that share a release
     const releaseCounts = new Map<string, { release: AlbumReleaseCandidate; count: number }>();
     for (const t of groupTracks) {
-      if (t.matchedRelease) {
+      if (t.matchedRelease && t.matchedRelease.releaseId) {
         const cur = releaseCounts.get(t.matchedRelease.releaseId);
         releaseCounts.set(t.matchedRelease.releaseId, {
           release: t.matchedRelease,
@@ -287,7 +287,7 @@ export function classifyAllTracks(
       Array.from(releaseCounts.values()).sort((a, b) => b.count - a.count)[0]?.release ?? null;
 
     const wholeRemixAlbum = isWholeRemixAlbum(
-      groupTracks[0]?.album || groupTracks[0]?.originalTags.album || '',
+      groupTracks[0]?.album || groupTracks[0]?.originalTags?.album || '',
       groupTracks,
       dominantRelease
     );
@@ -313,8 +313,8 @@ export function classifyAllTracks(
         continue;
       }
 
-      const keywordInTitle = hasRemixKeyword(track.title || track.originalTags.title);
-      const lowConfidence = track.acoustidConfidence < config.confidenceThreshold;
+      const keywordInTitle = hasRemixKeyword(track.title || track.originalTags?.title);
+      const lowConfidence = (track.acoustidConfidence ?? 0) < config.confidenceThreshold;
       const missingMb = !track.mbRecordingId;
 
       // Without a confident release match, never auto-sort the album: all tracks get review
@@ -394,8 +394,8 @@ export function classifyAllTracks(
       continue;
     }
 
-    const keywordInTitle = hasRemixKeyword(track.title || track.originalTags.title);
-    const lowConfidence = track.acoustidConfidence < config.confidenceThreshold;
+    const keywordInTitle = hasRemixKeyword(track.title || track.originalTags?.title);
+    const lowConfidence = (track.acoustidConfidence ?? 0) < config.confidenceThreshold;
     const missingMb = !track.mbRecordingId;
 
     // Rule 1: DJ-Remix ONLY when keyword AND (low confidence OR no MB match)
@@ -461,9 +461,9 @@ export function buildDuplicateGroups(
 
     if (isDj) {
       // DJ-Remixes ONLY match another DJ-Remix with identical full title (incl. remix suffix) + duration ±2s
-      const normFullTitle = normalizeTitleForMatch(track.title || track.originalTags.title);
-      const normArtist = normalizeArtistExact(track.artist || track.originalTags.artist);
-      const durBucket = Math.round(track.durationSec / 2);
+      const normFullTitle = normalizeTitleForMatch(track.title || track.originalTags?.title);
+      const normArtist = normalizeArtistExact(track.artist || track.originalTags?.artist);
+      const durBucket = Math.round((track.durationSec || 0) / 2);
       key = `dj:${normArtist}::${normFullTitle}::${durBucket}`;
       reason = 'normalized_title_artist_duration';
     } else if (track.mbRecordingId) {
@@ -473,9 +473,9 @@ export function buildDuplicateGroups(
       key = `acoustid:${track.acoustidId}`;
       reason = 'acoustid_fingerprint';
     } else {
-      const normTitle = normalizeTitleForMatch(track.title || track.originalTags.title);
-      const normArtist = normalizeArtistExact(track.artist || track.originalTags.artist);
-      const durBucket = Math.round(track.durationSec / 2);
+      const normTitle = normalizeTitleForMatch(track.title || track.originalTags?.title);
+      const normArtist = normalizeArtistExact(track.artist || track.originalTags?.artist);
+      const durBucket = Math.round((track.durationSec || 0) / 2);
       key = `fallback:${normArtist}::${normTitle}::${durBucket}`;
       reason = 'normalized_title_artist_duration';
     }
@@ -664,9 +664,9 @@ export function evaluateLibraryPlan(
     if (cls !== 'album_track' || track.isLooseFile || duplicateMoveTrackMap.has(track.id)) {
       continue;
     }
-    const albumKey = track.matchedRelease
+    const albumKey = track.matchedRelease?.releaseId
       ? `rel:${track.matchedRelease.releaseId}`
-      : `alb:${normalizeTitleForMatch(track.album || track.originalTags.album)}::${track.sourceDir}`;
+      : `alb:${normalizeTitleForMatch(track.album || track.originalTags?.album)}::${track.sourceDir || ''}`;
     const list = albumBuckets.get(albumKey) ?? [];
     list.push(track);
     albumBuckets.set(albumKey, list);
@@ -725,9 +725,9 @@ export function evaluateLibraryPlan(
     const isDuplicateToMove = duplicateMoveTrackMap.has(track.id);
     const duplicateGroupId = duplicateMoveTrackMap.get(track.id) ?? null;
 
-    const albumKey = track.matchedRelease
+    const albumKey = track.matchedRelease?.releaseId
       ? `rel:${track.matchedRelease.releaseId}`
-      : `alb:${normalizeTitleForMatch(track.album || track.originalTags.album)}::${track.sourceDir}`;
+      : `alb:${normalizeTitleForMatch(track.album || track.originalTags?.album)}::${track.sourceDir || ''}`;
     const albumMeta = albumQualityMap.get(albumKey);
 
     const albumQuality =
@@ -745,7 +745,7 @@ export function evaluateLibraryPlan(
     const willSkipInMode2 =
       hasOpenArtistConflict ||
       isReview ||
-      (track.acoustidConfidence < config.confidenceThreshold &&
+      ((track.acoustidConfidence ?? 0) < config.confidenceThreshold &&
         clsInfo.classification !== 'dj_remix' &&
         track.manualAssignment === 'none');
 
@@ -762,16 +762,25 @@ export function evaluateLibraryPlan(
     // DJ-Remix: Artist & Title NEVER overwritten; empty Key/BPM/ReplayGain/Cover enrichable when config ON
     const willEnrichRemixEmptyFields: string[] = [];
     if (clsInfo.classification === 'dj_remix' && config.enrichRemixEmptyFields) {
-      if (!track.originalTags.key && config.enableEssentia && config.essentiaAvailable) {
+      if (!track.originalTags?.key && config.enableEssentia && config.essentiaAvailable) {
         willEnrichRemixEmptyFields.push('Key');
       }
-      if (track.originalTags.bpm === null && config.enableEssentia && config.essentiaAvailable) {
+      if (
+        (track.originalTags?.bpm === null || track.originalTags?.bpm === undefined) &&
+        config.enableEssentia &&
+        config.essentiaAvailable
+      ) {
         willEnrichRemixEmptyFields.push('BPM');
       }
       if (config.writeReplayGain) {
         willEnrichRemixEmptyFields.push('ReplayGain');
       }
-      if (!track.cover.embeddedBefore && config.embedCover && track.cover.status !== 'missing') {
+      if (
+        !track.cover?.embeddedBefore &&
+        config.embedCover &&
+        track.cover &&
+        track.cover.status !== 'missing'
+      ) {
         willEnrichRemixEmptyFields.push('Cover');
       }
     }
@@ -782,24 +791,24 @@ export function evaluateLibraryPlan(
     const wavMediaSkipped = isWavCodec(track.codec, track.extension) && !config.wavEmbedMedia;
 
     // Build target path per rules
-    let targetRelativePath = track.sourceRelativePath;
+    let targetRelativePath = String(track.sourceRelativePath ?? track.fileName ?? '');
     let sanitizedChanged = false;
     let tooLong = false;
 
     const paddedTrack = track.trackNumber
-      ? track.trackNumber.toString().padStart(2, '0')
+      ? String(track.trackNumber).padStart(2, '0')
       : '';
     const fileStem =
       clsInfo.classification === 'dj_remix'
-        ? `${track.originalTags.artist || track.artist} - ${track.originalTags.title || track.title}`
+        ? `${track.originalTags?.artist || track.artist || 'Unbekannt'} - ${track.originalTags?.title || track.title || 'Unbekannt'}`
         : paddedTrack
-          ? `${paddedTrack} - ${track.title}`
-          : `${track.artist} - ${track.title}`;
+          ? `${paddedTrack} - ${track.title || 'Unbekannt'}`
+          : `${track.artist || 'Unbekannt'} - ${track.title || 'Unbekannt'}`;
 
     if (isDuplicateToMove) {
       const san = sanitizeRelativePath(
         ['_Duplikate', resolvedAlbumArtist],
-        `${track.title} [${track.codec.toUpperCase()} ${track.bitrateKbps}k]`,
+        `${track.title || 'Unbekannt'} [${String(track.codec || 'audio').toUpperCase()} ${track.bitrateKbps || 0}k]`,
         track.extension,
         config.maxPathLength
       );
@@ -808,12 +817,12 @@ export function evaluateLibraryPlan(
       tooLong = san.tooLong;
     } else if (isReview) {
       if (config.keepReviewTracksInPlace) {
-        targetRelativePath = track.sourceRelativePath;
+        targetRelativePath = String(track.sourceRelativePath ?? track.fileName ?? '');
       } else {
         // Quality-split _Review/Lossless/{relPath} or _Review/Lossy/{relPath} per Codec
         const reviewBucket = isLosslessCodec(track.codec) ? 'Lossless' : 'Lossy';
-        const parts = track.sourceRelativePath.split('/');
-        const origFile = parts.pop() ?? track.fileName;
+        const parts = String(track.sourceRelativePath ?? track.fileName ?? '').split('/');
+        const origFile = parts.pop() ?? track.fileName ?? 'Unbekannt';
         const origStem = origFile.replace(/\.[^.]+$/, '');
         const san = sanitizeRelativePath(
           ['_Review', reviewBucket, ...parts],
@@ -826,7 +835,7 @@ export function evaluateLibraryPlan(
         tooLong = san.tooLong;
       }
     } else if (clsInfo.classification === 'dj_remix') {
-      const djArtist = track.originalTags.albumArtist || resolvedAlbumArtist;
+      const djArtist = track.originalTags?.albumArtist || resolvedAlbumArtist;
       const segments =
         config.djRemixLayout === 'root_folder'
           ? ['DJ-Remixes', djArtist]

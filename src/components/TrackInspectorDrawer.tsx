@@ -67,16 +67,24 @@ export function TrackInspectorDrawer({
     setImgError(false);
     setActiveTab('overview');
     setChosenAssignment(track.manualAssignment === 'none' ? 'album_track' : track.manualAssignment);
-    setSelectedReleaseId(track.manualReleaseId ?? track.availableReleases[0]?.releaseId ?? '');
-    setEditAlbumArtist(track.albumArtist);
-    setEditArtist(track.artist);
-    setEditTitle(track.title);
-    setEditAlbum(track.album);
-    setEditYear(track.year);
-    setEditTrackNo(track.trackNumber);
-    setLyricsDraft(track.lyrics.syncedLrc || track.lyrics.plainText || '');
+    setSelectedReleaseId(track.manualReleaseId ?? track.availableReleases?.[0]?.releaseId ?? '');
+    setEditAlbumArtist(track.albumArtist || '');
+    setEditArtist(track.artist || '');
+    setEditTitle(track.title || '');
+    setEditAlbum(track.album || '');
+    setEditYear(track.year || '');
+    setEditTrackNo(track.trackNumber || '');
+    setLyricsDraft(track.lyrics?.syncedLrc || track.lyrics?.plainText || '');
     setLyricsSavedToast(false);
-  }, [track]);
+  }, [track?.id]);
+
+  useEffect(() => {
+    if (!track) return;
+    const incomingLyrics = track.lyrics?.syncedLrc || track.lyrics?.plainText || '';
+    if (incomingLyrics) {
+      setLyricsDraft((prev) => (prev ? prev : incomingLyrics));
+    }
+  }, [track?.lyrics?.syncedLrc, track?.lyrics?.plainText]);
 
   useEffect(() => {
     if (!track) return;
@@ -144,53 +152,53 @@ export function TrackInspectorDrawer({
   const tagDiffRows: Array<{ field: string; before: string; after: string; locked?: boolean }> = [
     {
       field: 'ALBUMARTIST',
-      before: track.originalTags.albumArtist || '—',
+      before: track.originalTags?.albumArtist || '—',
       after:
         plan.classification === 'dj_remix'
-          ? track.originalTags.albumArtist || track.albumArtist
+          ? track.originalTags?.albumArtist || track.albumArtist
           : plan.resolvedAlbumArtist,
       locked: plan.classification === 'dj_remix' || plan.willSkipInMode2,
     },
     {
       field: 'ARTIST',
-      before: track.originalTags.artist || '—',
+      before: track.originalTags?.artist || '—',
       after:
         plan.classification === 'dj_remix'
-          ? track.originalTags.artist || track.artist
+          ? track.originalTags?.artist || track.artist
           : track.artist,
       locked: plan.classification === 'dj_remix' || plan.willSkipInMode2,
     },
     {
       field: 'TITLE',
-      before: track.originalTags.title || '—',
+      before: track.originalTags?.title || '—',
       after:
         plan.classification === 'dj_remix'
-          ? track.originalTags.title || track.title
+          ? track.originalTags?.title || track.title
           : track.title,
       locked: plan.classification === 'dj_remix' || plan.willSkipInMode2,
     },
     {
       field: 'ALBUM',
-      before: track.originalTags.album || '—',
+      before: track.originalTags?.album || '—',
       after:
         plan.classification === 'dj_remix'
-          ? track.originalTags.album || '—'
+          ? track.originalTags?.album || '—'
           : track.album || '—',
       locked: plan.classification === 'dj_remix' || plan.willSkipInMode2,
     },
     {
       field: 'INITIALKEY / TKEY',
-      before: track.originalTags.key || '—',
+      before: track.originalTags?.key || '—',
       after:
         !config.enableEssentia || !config.essentiaAvailable
           ? 'Essentia aus'
           : plan.classification === 'dj_remix' && !config.enrichRemixEmptyFields
-            ? track.originalTags.key || '—'
+            ? track.originalTags?.key || '—'
             : keyDisplay,
     },
     {
       field: 'BPM',
-      before: track.originalTags.bpm ? String(track.originalTags.bpm) : '—',
+      before: track.originalTags?.bpm ? String(track.originalTags.bpm) : '—',
       after:
         !config.enableEssentia || !config.essentiaAvailable
           ? 'Essentia aus'
@@ -200,14 +208,14 @@ export function TrackInspectorDrawer({
     },
     {
       field: 'COMPILATION',
-      before: track.originalTags.compilation ? '1' : '0',
+      before: track.originalTags?.compilation ? '1' : '0',
       after: track.compilationFlag ? '1 (Various Artists)' : '0',
     },
     {
       field: 'REPLAYGAIN',
       before: '—',
       after:
-        config.writeReplayGain && track.replayGainDb !== null
+        config.writeReplayGain && typeof track.replayGainDb === 'number'
           ? `${track.replayGainDb.toFixed(1)} dB`
           : 'Deaktiviert',
     },
@@ -238,7 +246,7 @@ export function TrackInspectorDrawer({
               <span aria-hidden="true">·</span>
               <span className="font-mono tabular-nums">
                 {track.bitDepth ? `${track.bitDepth}-Bit / ` : ''}
-                {(track.sampleRateHz / 1000).toFixed(1)} kHz · {track.bitrateKbps} kbps
+                {((track.sampleRateHz || 44100) / 1000).toFixed(1)} kHz · {track.bitrateKbps || 0} kbps
               </span>
               <span aria-hidden="true">·</span>
               <span className="font-mono tabular-nums">
@@ -345,7 +353,7 @@ export function TrackInspectorDrawer({
                         {track.matchedRelease.title}
                       </span>
                       <span className="font-mono tabular-nums text-emerald-400">
-                        Match {Math.round(track.matchedRelease.matchScore * 100)} %
+                        Match {Math.round((track.matchedRelease.matchScore ?? 0.85) * 100)} %
                       </span>
                     </div>
                     <div className="text-slate-400">
@@ -365,7 +373,7 @@ export function TrackInspectorDrawer({
                   <div className="bg-[#0F172A] border border-[#243044] rounded-md p-4 text-xs text-slate-400">
                     Kein sicheres Album-Release zugeordnet. Konfidenz:{' '}
                     <span className="font-mono tabular-nums text-amber-400">
-                      {Math.round(track.acoustidConfidence * 100)} %
+                      {Math.round((track.acoustidConfidence ?? 0) * 100)} %
                     </span>{' '}
                     (Schwellwert {Math.round(config.confidenceThreshold * 100)} %).
                   </div>
@@ -609,7 +617,7 @@ export function TrackInspectorDrawer({
               {/* Cover Art Section */}
               <div className="flex flex-col sm:flex-row gap-5 items-start bg-[#0F172A] border border-[#243044] rounded-md p-4">
                 <div className="w-32 h-32 shrink-0 rounded-md overflow-hidden border border-[#243044] bg-slate-900 flex items-center justify-center">
-                  {track.cover.imageUrl && !imgError ? (
+                  {track.cover?.imageUrl && !imgError ? (
                     <img
                       src={track.cover.imageUrl}
                       alt={`Album-Cover für ${track.album || track.title}`}
@@ -619,7 +627,7 @@ export function TrackInspectorDrawer({
                     />
                   ) : (
                     <div
-                      className={`w-full h-full bg-gradient-to-br ${track.cover.fallbackGradient} flex flex-col items-center justify-center gap-1.5 text-slate-400 p-2 text-center`}
+                      className={`w-full h-full bg-gradient-to-br ${track.cover?.fallbackGradient || 'from-slate-800 to-slate-900'} flex flex-col items-center justify-center gap-1.5 text-slate-400 p-2 text-center`}
                     >
                       <Disc className="h-7 w-7 opacity-70" />
                       <span className="text-[11px]">Kein Cover</span>
@@ -633,18 +641,18 @@ export function TrackInspectorDrawer({
                   </div>
                   <div className="text-slate-300 space-y-1">
                     <div>
-                      Quelle: <span className="text-slate-100">{track.cover.source}</span> ·
+                      Quelle: <span className="text-slate-100">{track.cover?.source || 'Keine'}</span> ·
                       Auflösung:{' '}
                       <span className="font-mono tabular-nums text-slate-100">
-                        {track.cover.resolution}
+                        {track.cover?.resolution || '—'}
                       </span>{' '}
                       · Größe:{' '}
                       <span className="font-mono tabular-nums text-slate-100">
-                        {track.cover.sizeKb} KB
+                        {track.cover?.sizeKb || 0} KB
                       </span>
                     </div>
                     <div className="text-slate-400">
-                      Vorher eingebettet: {track.cover.embeddedBefore ? 'Ja' : 'Nein'} · Zielformat:{' '}
+                      Vorher eingebettet: {track.cover?.embeddedBefore ? 'Ja' : 'Nein'} · Zielformat:{' '}
                       <span className="font-mono">
                         {track.codec === 'flac'
                           ? 'METADATA_BLOCK_PICTURE'
@@ -734,14 +742,14 @@ export function TrackInspectorDrawer({
                 <div className="flex items-center gap-2">
                   <Music2 className="h-4 w-4 text-sky-400" />
                   <span>
-                    Quelle: <strong className="text-slate-200">{track.lyrics.source}</strong> ·
+                    Quelle: <strong className="text-slate-200">{track.lyrics?.source || 'Keine'}</strong> ·
                     Status:{' '}
                     <strong className="text-slate-200">
-                      {track.lyrics.status === 'synced'
+                      {track.lyrics?.status === 'synced'
                         ? 'Synchronisiert (LRC)'
-                        : track.lyrics.status === 'plain'
+                        : track.lyrics?.status === 'plain'
                           ? 'Volltext'
-                          : track.lyrics.status === 'instrumental'
+                          : track.lyrics?.status === 'instrumental'
                             ? 'Instrumental'
                             : 'Fehlt'}
                     </strong>

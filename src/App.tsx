@@ -13,6 +13,7 @@ import {
   fetchBackendHealth,
   fetchBackendQueue,
   fetchBackendState,
+  fetchBackendTrackDetail,
   postBackendAction,
 } from './engine/apiClient';
 import { ArtistResolutionOverrides } from './engine/artistDedupe';
@@ -143,69 +144,78 @@ export default function App() {
     };
   }, [revokeCoverUrls]);
 
-  // Connect to real FastAPI Single-Container backend if available
+  // Connect to real FastAPI Single-Container backend if available (with in-flight mutex)
+  const inFlightStateSyncRef = useRef(false);
+  const trackCountRef = useRef(0);
+  trackCountRef.current = tracks.length;
+
   const checkAndLoadBackend = useCallback(
     async (targetUrl: string, silent = false) => {
+      if (inFlightStateSyncRef.current) return;
+      inFlightStateSyncRef.current = true;
       setBackendChecking(true);
-      const health = await fetchBackendHealth(targetUrl);
-      if (!health) {
-        setBackendConnected(false);
-        setMusicDirExists(null);
-        setBackendChecking(false);
+      try {
+        const health = await fetchBackendHealth(targetUrl);
+        if (!health) {
+          setBackendConnected(false);
+          setMusicDirExists(null);
+          if (!silent) {
+            showToast(
+              'Kein TonArchiv FastAPI-Backend erreichbar. Nutze den lokalen Ordner-Scan oder starte den Docker-Container.'
+            );
+          }
+          return;
+        }
+
+        setBackendConnected(true);
+        setMusicDirExists(health.music_dir_exists ?? null);
+        if (targetUrl.trim() && typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem('tonarchiv:backendUrl', targetUrl.trim());
+          } catch {
+            // Ignore storage quota errors
+          }
+        }
+        setConfig((prev) => ({
+          ...prev,
+          ...(health.config ?? {}),
+          containerMusicDir: health.music_dir || prev.containerMusicDir,
+          essentiaAvailable: health.essentia_available,
+          acoustidKeyConfigured: health.acoustid_configured,
+          discogsTokenConfigured: health.discogs_configured,
+          enableShazamFallback: health.shazamio_enabled,
+          wavEmbedMedia: health.wav_embed_media,
+        }));
+
+        const state = await fetchBackendState(targetUrl);
+        if (state) {
+          revokeCoverUrls();
+          if (state.config) {
+            setConfig((prev) => ({ ...prev, ...state.config }));
+          }
+          setTracks(state.tracks ?? []);
+          setCompanions(state.companions ?? []);
+          setLeftovers(state.leftovers ?? []);
+          setJournal(state.journal ?? INITIAL_JOURNAL);
+          setCache(state.cache ?? INITIAL_CACHE);
+          if (state.queue) {
+            setQueue(state.queue);
+          }
+          setMode1Completed(Boolean(state.mode1Completed));
+          setMode2Completed(Boolean(state.mode2Completed));
+          setMode3Completed(Boolean(state.mode3Completed));
+          setActiveSourceLabel(health.music_dir || '/music');
+        }
+
         if (!silent) {
-          showToast(
-            'Kein TonArchiv FastAPI-Backend erreichbar. Nutze den lokalen Ordner-Scan oder starte den Docker-Container.'
-          );
+          showToast(`Mit TonArchiv FastAPI-Backend (${health.music_dir}) verbunden.`);
         }
-        return;
-      }
-
-      setBackendConnected(true);
-      setMusicDirExists(health.music_dir_exists ?? null);
-      if (targetUrl.trim() && typeof window !== 'undefined') {
-        try {
-          window.localStorage.setItem('tonarchiv:backendUrl', targetUrl.trim());
-        } catch {
-          // Ignore storage quota errors
-        }
-      }
-      setConfig((prev) => ({
-        ...prev,
-        ...(health.config ?? {}),
-        containerMusicDir: health.music_dir || prev.containerMusicDir,
-        essentiaAvailable: health.essentia_available,
-        acoustidKeyConfigured: health.acoustid_configured,
-        discogsTokenConfigured: health.discogs_configured,
-        enableShazamFallback: health.shazamio_enabled,
-        wavEmbedMedia: health.wav_embed_media,
-      }));
-
-      const state = await fetchBackendState(targetUrl);
-      if (state) {
-        revokeCoverUrls();
-        if (state.config) {
-          setConfig((prev) => ({ ...prev, ...state.config }));
-        }
-        setTracks(state.tracks ?? []);
-        setCompanions(state.companions ?? []);
-        setLeftovers(state.leftovers ?? []);
-        setJournal(state.journal ?? INITIAL_JOURNAL);
-        setCache(state.cache ?? INITIAL_CACHE);
-        if (state.queue) {
-          setQueue(state.queue);
-        }
-        setMode1Completed(Boolean(state.mode1Completed));
-        setMode2Completed(Boolean(state.mode2Completed));
-        setMode3Completed(Boolean(state.mode3Completed));
-        setActiveSourceLabel(health.music_dir || config.containerMusicDir);
-      }
-
-      setBackendChecking(false);
-      if (!silent) {
-        showToast(`Mit TonArchiv FastAPI-Backend (${health.music_dir}) verbunden.`);
+      } finally {
+        inFlightStateSyncRef.current = false;
+        setBackendChecking(false);
       }
     },
-    [config.containerMusicDir, revokeCoverUrls, showToast]
+    [revokeCoverUrls, showToast]
   );
 
   useEffect(() => {
@@ -219,30 +229,56 @@ export default function App() {
     }
   }, [checkAndLoadBackend]);
 
-  // Live polling when FastAPI background queue (e.g. AUTO_ANALYZE_ON_START or Mode 1) is active
-  const lastStateSyncAtRef = useRef<number>(0);
+  // Live polling when FastAPI background queue is active:
+  // Polls ONLY lightweight /api/queue every 2s (no overlapping fetches, no 10s full-state hammering on mobile).
+  // Syncs full /api/state once when initial tracks appear or when the job finishes/errors.
+  const queuePollBusyRef = useRef(false);
+  const lastEmptyTrackSyncRef = useRef(0);
   useEffect(() => {
     if (!backendConnected) return;
     if (queue.status !== 'running' && queue.status !== 'paused') return;
     const timer = window.setInterval(async () => {
-      const liveQueue = await fetchBackendQueue(backendUrl);
-      if (!liveQueue) return;
-      setQueue(liveQueue);
+      if (queuePollBusyRef.current) return;
+      queuePollBusyRef.current = true;
+      try {
+        const liveQueue = await fetchBackendQueue(backendUrl);
+        if (!liveQueue) return;
+        setQueue(liveQueue);
 
-      const now = Date.now();
-      const finished =
-        liveQueue.status === 'completed' ||
-        liveQueue.status === 'idle' ||
-        liveQueue.status === 'error';
-      const periodicSyncDue = now - lastStateSyncAtRef.current >= 10_000;
+        const finished =
+          liveQueue.status === 'completed' ||
+          liveQueue.status === 'idle' ||
+          liveQueue.status === 'error';
 
-      if (finished || periodicSyncDue) {
-        lastStateSyncAtRef.current = now;
-        await checkAndLoadBackend(backendUrl, true);
+        const now = Date.now();
+        const needsInitialTrackLoad =
+          trackCountRef.current === 0 &&
+          liveQueue.totalCount > 0 &&
+          now - lastEmptyTrackSyncRef.current >= 25_000;
+
+        if (finished || needsInitialTrackLoad) {
+          lastEmptyTrackSyncRef.current = now;
+          await checkAndLoadBackend(backendUrl, true);
+        }
+      } finally {
+        queuePollBusyRef.current = false;
       }
-    }, 1500);
+    }, 2000);
     return () => window.clearInterval(timer);
   }, [backendConnected, backendUrl, queue.status, checkAndLoadBackend]);
+
+  // Load full track detail (including full synced/plain lyrics) on demand when opening inspector
+  const handleSelectTrack = useCallback(
+    (trackId: string) => {
+      setSelectedTrackId(trackId);
+      if (!backendConnected) return;
+      void fetchBackendTrackDetail(backendUrl, trackId).then((detail) => {
+        if (!detail) return;
+        setTracks((prev) => prev.map((t) => (t.id === detail.id ? { ...t, ...detail } : t)));
+      });
+    },
+    [backendConnected, backendUrl]
+  );
 
   // Real local folder ingestion via music-metadata
   const handleImportLocalFiles = useCallback(
@@ -329,7 +365,10 @@ export default function App() {
         pendingReRunCount: pendingReRunTracks.length,
         queueRunningOrPaused: queue.status === 'running' || queue.status === 'paused',
         hasInterruptedJournal:
-          journal.state === 'interrupted' || cache.interruptedAnalyzeCheckpoint !== null,
+          journal.state === 'interrupted' ||
+          (cache.interruptedAnalyzeCheckpoint !== null &&
+            queue.status !== 'running' &&
+            queue.status !== 'paused'),
         totalTracks: tracks.length,
         backendConnected,
       }),
@@ -866,7 +905,7 @@ export default function App() {
               onClearLoadedLibrary={handleClearLoadedLibrary}
               onSearchChange={setSearchQuery}
               onFilterChange={setActiveFilter}
-              onSelectTrack={setSelectedTrackId}
+              onSelectTrack={handleSelectTrack}
               onNavigateSection={setActiveSection}
               onToggleKeepReviewInPlace={(keep) =>
                 setConfig((prev) => ({ ...prev, keepReviewTracksInPlace: keep }))

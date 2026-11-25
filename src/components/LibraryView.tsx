@@ -13,7 +13,7 @@ import {
   Server,
   Trash2,
 } from 'lucide-react';
-import { ChangeEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { formatCodecLabel } from '../engine/codecAndSanitizer';
 import {
   AnalysisReport,
@@ -120,16 +120,24 @@ export function LibraryView({
 }: LibraryViewProps) {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const filesInputRef = useRef<HTMLInputElement | null>(null);
-  const [visibleCount, setVisibleCount] = useState(100);
+  const [visibleCount, setVisibleCount] = useState(50);
+  const [visibleCompanionsCount, setVisibleCompanionsCount] = useState(30);
+  const [visibleLeftoversCount, setVisibleLeftoversCount] = useState(30);
 
   useEffect(() => {
-    setVisibleCount(100);
+    setVisibleCount(50);
   }, [activeFilter, searchQuery]);
 
   const hasCrashRecovery =
-    journal.state === 'interrupted' || cache.interruptedAnalyzeCheckpoint !== null;
+    journal.state === 'interrupted' ||
+    (cache.interruptedAnalyzeCheckpoint !== null &&
+      queue.status !== 'running' &&
+      queue.status !== 'paused');
 
-  const pendingReRunTracks = tracks.filter((t) => t.pendingReRunTagAndMove);
+  const pendingReRunTracks = useMemo(
+    () => tracks.filter((t) => t.pendingReRunTagAndMove),
+    [tracks]
+  );
 
   const handleFileSelection = (e: ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files;
@@ -139,46 +147,51 @@ export function LibraryView({
     e.target.value = '';
   };
 
-  const filteredTracks = tracks.filter((track) => {
-    const plan = trackPlans.get(track.id);
-    if (!plan) return false;
-
-    if (activeFilter === 'lossless' && plan.codecQuality !== 'lossless') return false;
-    if (activeFilter === 'lossy_high' && plan.codecQuality !== 'lossy_high') return false;
-    if (activeFilter === 'lossy_low' && plan.codecQuality !== 'lossy_low') return false;
-    if (activeFilter === 'dj_remix' && plan.classification !== 'dj_remix') return false;
-    if (
-      activeFilter === 'review' &&
-      plan.classification !== 'review_low_confidence' &&
-      plan.classification !== 'review_no_release_match'
-    ) {
-      return false;
-    }
-    if (
-      activeFilter === 'conflicts' &&
-      !plan.hasOpenArtistConflict &&
-      plan.collision === 'none' &&
-      !track.spectralWarningOnly &&
-      !track.detachedFromAlbum
-    ) {
-      return false;
-    }
-
+  const filteredTracks = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      String(track.title ?? '').toLowerCase().includes(q) ||
-      String(track.artist ?? '').toLowerCase().includes(q) ||
-      String(plan.resolvedAlbumArtist ?? '').toLowerCase().includes(q) ||
-      String(track.album ?? '').toLowerCase().includes(q) ||
-      String(track.fileName ?? '').toLowerCase().includes(q) ||
-      String(track.codec ?? '').toLowerCase().includes(q) ||
-      String(track.camelotKey ?? '').toLowerCase().includes(q) ||
-      String(plan.targetRelativePath ?? '').toLowerCase().includes(q)
-    );
-  });
+    return tracks.filter((track) => {
+      const plan = trackPlans.get(track.id);
+      if (!plan) return false;
 
-  const visibleTracks = filteredTracks.slice(0, visibleCount);
+      if (activeFilter === 'lossless' && plan.codecQuality !== 'lossless') return false;
+      if (activeFilter === 'lossy_high' && plan.codecQuality !== 'lossy_high') return false;
+      if (activeFilter === 'lossy_low' && plan.codecQuality !== 'lossy_low') return false;
+      if (activeFilter === 'dj_remix' && plan.classification !== 'dj_remix') return false;
+      if (
+        activeFilter === 'review' &&
+        plan.classification !== 'review_low_confidence' &&
+        plan.classification !== 'review_no_release_match'
+      ) {
+        return false;
+      }
+      if (
+        activeFilter === 'conflicts' &&
+        !plan.hasOpenArtistConflict &&
+        plan.collision === 'none' &&
+        !track.spectralWarningOnly &&
+        !track.detachedFromAlbum
+      ) {
+        return false;
+      }
+
+      if (!q) return true;
+      return (
+        String(track.title ?? '').toLowerCase().includes(q) ||
+        String(track.artist ?? '').toLowerCase().includes(q) ||
+        String(plan.resolvedAlbumArtist ?? '').toLowerCase().includes(q) ||
+        String(track.album ?? '').toLowerCase().includes(q) ||
+        String(track.fileName ?? '').toLowerCase().includes(q) ||
+        String(track.codec ?? '').toLowerCase().includes(q) ||
+        String(track.camelotKey ?? '').toLowerCase().includes(q) ||
+        String(plan.targetRelativePath ?? '').toLowerCase().includes(q)
+      );
+    });
+  }, [tracks, trackPlans, activeFilter, searchQuery]);
+
+  const visibleTracks = useMemo(
+    () => filteredTracks.slice(0, visibleCount),
+    [filteredTracks, visibleCount]
+  );
 
   const filterButtons: Array<{ id: LibraryFilterId; label: string; count: number }> = [
     { id: 'all', label: 'Alle', count: report.totalAudioTracks },
@@ -202,10 +215,16 @@ export function LibraryView({
     },
   ];
 
-  const skippedMode2Tracks = tracks.filter((t) => trackPlans.get(t.id)?.hasOpenArtistConflict);
+  const skippedMode2Tracks = useMemo(
+    () => tracks.filter((t) => trackPlans.get(t.id)?.hasOpenArtistConflict),
+    [tracks, trackPlans]
+  );
+  const journalEntries = journal.entries ?? [];
+  const journalRemovedDirs = journal.removedEmptyDirs ?? [];
+  const queueErrors = queue.errors ?? [];
   const canRollback =
     backendConnected &&
-    journal.entries.some((e) => e.status === 'done') &&
+    journalEntries.some((e) => e.status === 'done') &&
     journal.state !== 'rolled_back' &&
     queue.status !== 'running';
 
@@ -246,7 +265,7 @@ export function LibraryView({
             </div>
             <p className="text-xs text-slate-300 leading-relaxed">
               {journal.state === 'interrupted'
-                ? `Das atomare Journal rollback.json (${journal.entries.filter((e) => e.status === 'done').length} done, ${journal.entries.filter((e) => e.status === 'pending').length} pending) wurde vor Abschluss unterbrochen. Du kannst den Lauf fortsetzen oder alle Pfade & Original-Tags zurückrollen.`
+                ? `Das atomare Journal rollback.json (${journalEntries.filter((e) => e.status === 'done').length} done, ${journalEntries.filter((e) => e.status === 'pending').length} pending) wurde vor Abschluss unterbrochen. Du kannst den Lauf fortsetzen oder alle Pfade & Original-Tags zurückrollen.`
                 : `Ein vorheriger Analyse-Lauf wurde bei Checkpoint #${cache.interruptedAnalyzeCheckpoint} unterbrochen. Gespeicherte Ergebnisse liegen im SQLite-Cache bereit.`}
             </p>
           </div>
@@ -474,13 +493,19 @@ export function LibraryView({
             </div>
           )}
 
-          {queue.errors.length > 0 && (
+          {queueErrors.length > 0 && (
             <div className="pt-2 border-t border-[#243044] space-y-1">
-              {queue.errors.map((err) => (
-                <div key={err.id} className="text-xs text-amber-300 flex items-center gap-2">
-                  <span className="font-mono text-amber-400">[{err.stage}]</span>
-                  <span>
-                    {err.trackLabel}: {err.message} (Lauf nicht abgebrochen)
+              {queue.errorCount > 8 && (
+                <div className="text-[11px] font-mono text-slate-400">
+                  Letzte {Math.min(8, queueErrors.length)} von {queue.errorCount} Hinweisen (Lauf
+                  läuft weiter):
+                </div>
+              )}
+              {queueErrors.slice(-8).map((err) => (
+                <div key={err.id} className="text-xs text-amber-300 flex items-start gap-2 min-w-0">
+                  <span className="font-mono text-amber-400 shrink-0">[{err.stage}]</span>
+                  <span className="truncate">
+                    {err.trackLabel}: {err.message}
                   </span>
                 </div>
               ))}
@@ -604,7 +629,14 @@ export function LibraryView({
               <div className="text-amber-300">
                 Modus-2-Hinweis: {skippedMode2Tracks.length} Track(s) mit offenem
                 Künstlerkonflikt werden beim Taggen übersprungen (
-                {skippedMode2Tracks.map((t) => t.fileName).join(', ')}).
+                {skippedMode2Tracks
+                  .slice(0, 5)
+                  .map((t) => t.fileName)
+                  .join(', ')}
+                {skippedMode2Tracks.length > 5
+                  ? ` und ${skippedMode2Tracks.length - 5} weitere`
+                  : ''}
+                ).
               </div>
               <button
                 type="button"
@@ -1104,7 +1136,7 @@ export function LibraryView({
                                     : plan.classification === 'review_no_release_match'
                                       ? 'Review (kein Release-Match)'
                                       : plan.classification === 'review_low_confidence'
-                                        ? `Review (${Math.round(track.acoustidConfidence * 100)} %)`
+                                        ? `Review (${Math.round((track.acoustidConfidence ?? 0) * 100)} %)`
                                         : plan.albumQuality === 'lossless'
                                           ? 'Lossless-Album'
                                           : plan.albumQuality === 'lossy_low'
@@ -1162,10 +1194,10 @@ export function LibraryView({
                   </span>
                   <button
                     type="button"
-                    onClick={() => setVisibleCount((prev) => prev + 100)}
+                    onClick={() => setVisibleCount((prev) => prev + 50)}
                     className="px-4 py-2 min-h-[40px] rounded-md border border-[#243044] bg-[#0F172A] text-sky-300 font-medium hover:border-sky-400 whitespace-nowrap"
                   >
-                    Weitere 100 Tracks laden
+                    Weitere 50 Tracks laden
                   </button>
                 </div>
               )}
@@ -1195,7 +1227,7 @@ export function LibraryView({
               </div>
             ) : (
               <div className="divide-y divide-[#243044] text-xs">
-                {companions.map((c) => (
+                {companions.slice(0, visibleCompanionsCount).map((c) => (
                   <div key={c.id} className="px-5 py-3 flex items-center justify-between gap-4">
                     <div className="min-w-0">
                       <div className="font-mono text-slate-200 truncate">{c.fileName}</div>
@@ -1204,13 +1236,27 @@ export function LibraryView({
                       </div>
                     </div>
                     <div className="text-right shrink-0 font-mono tabular-nums text-slate-400">
-                      <div>{formatBytes(c.sizeBytes)}</div>
+                      <div>{formatBytes(c.sizeBytes || 0)}</div>
                       <div className={c.moved ? 'text-emerald-400' : 'text-slate-500'}>
                         {c.moved ? 'Verschoben' : 'Geplant'}
                       </div>
                     </div>
                   </div>
                 ))}
+                {companions.length > visibleCompanionsCount && (
+                  <div className="px-5 py-3 bg-[#111927] flex items-center justify-between gap-3">
+                    <span className="font-mono text-slate-400">
+                      Zeige {visibleCompanionsCount} von {companions.length}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setVisibleCompanionsCount((n) => n + 50)}
+                      className="text-sky-300 font-medium hover:text-sky-200"
+                    >
+                      Weitere 50 anzeigen
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -1232,7 +1278,7 @@ export function LibraryView({
               </div>
             ) : (
               <div className="divide-y divide-[#243044] text-xs">
-                {leftovers.map((item) => (
+                {leftovers.slice(0, visibleLeftoversCount).map((item) => (
                   <div key={item.id} className="px-5 py-3 flex items-start justify-between gap-4">
                     <div className="min-w-0">
                       <div className="font-mono text-slate-200 truncate">
@@ -1241,7 +1287,7 @@ export function LibraryView({
                       <div className="text-slate-400 mt-0.5">{item.reason}</div>
                     </div>
                     <div className="text-right shrink-0 font-mono tabular-nums text-slate-400">
-                      <div>{formatBytes(item.sizeBytes)}</div>
+                      <div>{formatBytes(item.sizeBytes || 0)}</div>
                       <div className="text-amber-400">
                         {item.kind === 'video'
                           ? 'Video'
@@ -1252,6 +1298,20 @@ export function LibraryView({
                     </div>
                   </div>
                 ))}
+                {leftovers.length > visibleLeftoversCount && (
+                  <div className="px-5 py-3 bg-[#111927] flex items-center justify-between gap-3">
+                    <span className="font-mono text-slate-400">
+                      Zeige {visibleLeftoversCount} von {leftovers.length}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setVisibleLeftoversCount((n) => n + 50)}
+                      className="text-sky-300 font-medium hover:text-sky-200"
+                    >
+                      Weitere 50 anzeigen
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -1265,8 +1325,8 @@ export function LibraryView({
             Atomares Write-Ahead-Journal (rollback.json · Temp + fsync + Rename)
           </div>
           <div className="text-slate-400 font-mono tabular-nums break-words">
-            Status: {journal.state} · Einträge: {journal.entries.length} · Gelöschte leere Ordner:{' '}
-            {journal.removedEmptyDirs.length}
+            Status: {journal.state} · Einträge: {journalEntries.length} · Gelöschte leere Ordner:{' '}
+            {journalRemovedDirs.length}
             {journal.backupConfirmedAt ? ' · Backup bestätigt' : ''}
           </div>
         </div>

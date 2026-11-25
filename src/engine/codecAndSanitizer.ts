@@ -58,12 +58,12 @@ export function isLosslessCodec(codec: AudioCodec): boolean {
   return LOSSLESS_CODECS.has(codec);
 }
 
-export function isWavCodec(codec: AudioCodec, extension: string): boolean {
-  return WAV_CODECS.has(codec) || extension.toLowerCase() === '.wav';
+export function isWavCodec(codec: AudioCodec, extension: string | null | undefined): boolean {
+  return WAV_CODECS.has(codec) || String(extension ?? '').toLowerCase() === '.wav';
 }
 
-export function formatCodecLabel(codec: AudioCodec, extension: string): string {
-  const ext = extension.replace('.', '').toUpperCase();
+export function formatCodecLabel(codec: AudioCodec, extension: string | null | undefined): string {
+  const ext = String(extension ?? '').replace('.', '').toUpperCase() || 'AUDIO';
   switch (codec) {
     case 'flac':
       return 'FLAC';
@@ -85,6 +85,8 @@ export function formatCodecLabel(codec: AudioCodec, extension: string): string {
       return 'Opus';
     case 'wma':
       return 'WMA';
+    default:
+      return String(codec || ext).toUpperCase();
   }
 }
 
@@ -108,13 +110,13 @@ export function computeAudioQualityScore(
 /**
  * Sanitizes a single path segment (folder name or file stem) for POSIX + SMB/Windows safety.
  */
-export function sanitizePathSegment(raw: string): {
+export function sanitizePathSegment(raw: string | null | undefined): {
   value: string;
   changed: boolean;
 } {
-  const original = raw;
+  const original = String(raw ?? '');
   // Normalize Unicode NFC and strip control chars + SMB/Windows illegal chars
-  let cleaned = raw
+  let cleaned = original
     .normalize('NFC')
     .replace(/[\u0000-\u001F\u007F]/g, '')
     .replace(/[<>:"/\\|?*]/g, '_')
@@ -142,9 +144,9 @@ export function sanitizePathSegment(raw: string): {
  * Sanitizes an entire relative path and enforces max path length without mangling extension.
  */
 export function sanitizeRelativePath(
-  segments: string[],
-  fileStem: string,
-  extension: string,
+  segments: Array<string | null | undefined>,
+  fileStem: string | null | undefined,
+  extension: string | null | undefined,
   maxPathLength: number
 ): {
   relativePath: string;
@@ -153,6 +155,7 @@ export function sanitizeRelativePath(
 } {
   let changed = false;
   const cleanSegments = segments
+    .map((s) => String(s ?? ''))
     .filter((s) => s.trim().length > 0)
     .map((segment) => {
       const res = sanitizePathSegment(segment);
@@ -163,7 +166,8 @@ export function sanitizeRelativePath(
   const cleanStemRes = sanitizePathSegment(fileStem);
   if (cleanStemRes.changed) changed = true;
 
-  const cleanExt = extension.startsWith('.') ? extension.toLowerCase() : `.${extension.toLowerCase()}`;
+  const rawExt = String(extension ?? '').trim().toLowerCase();
+  const cleanExt = !rawExt ? '' : rawExt.startsWith('.') ? rawExt : `.${rawExt}`;
   let fullPath = [...cleanSegments, `${cleanStemRes.value}${cleanExt}`].join('/');
   let tooLong = false;
 

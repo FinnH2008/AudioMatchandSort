@@ -1,4 +1,5 @@
 import { Check, Info, Layers } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { countCompleteTags } from '../engine/classifierAndPlanner';
 import { formatCodecLabel } from '../engine/codecAndSanitizer';
 import {
@@ -39,9 +40,17 @@ export function DuplicatesView({
   onSelectOriginal,
   onSetDecision,
 }: DuplicatesViewProps) {
-  const trackById = new Map(tracks.map((t) => [t.id, t]));
-  const actionableGroups = duplicateGroups.filter((g) => g.scope !== 'cross_album_notice');
-  const crossAlbumNotices = duplicateGroups.filter((g) => g.scope === 'cross_album_notice');
+  const [visibleGroups, setVisibleGroups] = useState(40);
+  const [visibleNotices, setVisibleNotices] = useState(30);
+  const trackById = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
+  const actionableGroups = useMemo(
+    () => duplicateGroups.filter((g) => g.scope !== 'cross_album_notice'),
+    [duplicateGroups]
+  );
+  const crossAlbumNotices = useMemo(
+    () => duplicateGroups.filter((g) => g.scope === 'cross_album_notice'),
+    [duplicateGroups]
+  );
 
   return (
     <div className="space-y-8">
@@ -74,7 +83,7 @@ export function DuplicatesView({
           </div>
         ) : (
           <div className="space-y-4">
-            {actionableGroups.map((group) => (
+            {actionableGroups.slice(0, visibleGroups).map((group) => (
               <div
                 key={group.id}
                 className="bg-[#151E2E] border border-[#243044] rounded-lg overflow-hidden"
@@ -144,13 +153,13 @@ export function DuplicatesView({
                             )}
                           </span>
                           <span className="font-mono text-slate-400">
-                            {formatMb(track.sizeBytes)} · {track.mtimeIso.slice(0, 10)}
+                            {formatMb(track.sizeBytes || 0)} · {String(track.mtimeIso || '').slice(0, 10) || '—'}
                           </span>
                         </div>
                         <div className="font-mono tabular-nums text-slate-200">
                           {formatCodecLabel(track.codec, track.extension)} ·{' '}
                           {track.bitDepth ? `${track.bitDepth}b/` : ''}
-                          {(track.sampleRateHz / 1000).toFixed(1)}k · {track.bitrateKbps} kbps ·{' '}
+                          {((track.sampleRateHz || 44100) / 1000).toFixed(1)}k · {track.bitrateKbps || 0} kbps ·{' '}
                           {countCompleteTags(track)}/10 Tags
                         </div>
                         <div className="font-mono text-slate-400 truncate">
@@ -202,11 +211,11 @@ export function DuplicatesView({
                             <td className="py-3 px-3 font-mono tabular-nums text-slate-200 truncate">
                               {formatCodecLabel(track.codec, track.extension)} ·{' '}
                               {track.bitDepth ? `${track.bitDepth}b/` : ''}
-                              {(track.sampleRateHz / 1000).toFixed(1)}k · {track.bitrateKbps} kbps
+                              {((track.sampleRateHz || 44100) / 1000).toFixed(1)}k · {track.bitrateKbps || 0} kbps
                             </td>
                             <td className="py-3 px-3 font-mono tabular-nums text-slate-400 truncate">
-                              {countCompleteTags(track)}/10 Tags · {formatMb(track.sizeBytes)} ·{' '}
-                              {track.mtimeIso.slice(0, 10)}
+                              {countCompleteTags(track)}/10 Tags · {formatMb(track.sizeBytes || 0)} ·{' '}
+                              {String(track.mtimeIso || '').slice(0, 10) || '—'}
                             </td>
                             <td
                               className="py-3 px-3 font-mono text-slate-400 truncate"
@@ -237,6 +246,20 @@ export function DuplicatesView({
                 </div>
               </div>
             ))}
+            {actionableGroups.length > visibleGroups && (
+              <div className="bg-[#151E2E] border border-[#243044] rounded-lg px-4 py-3 flex items-center justify-between gap-3 text-xs">
+                <span className="font-mono text-slate-400">
+                  Zeige {visibleGroups} von {actionableGroups.length} Duplikat-Gruppen
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setVisibleGroups((n) => n + 40)}
+                  className="px-3.5 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-sky-300 font-medium hover:border-sky-400"
+                >
+                  Weitere 40 laden
+                </button>
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -256,7 +279,7 @@ export function DuplicatesView({
           </div>
         ) : (
           <div className="divide-y divide-[#243044] bg-[#151E2E] border border-[#243044] rounded-lg">
-            {crossAlbumNotices.map((notice) => (
+            {crossAlbumNotices.slice(0, visibleNotices).map((notice) => (
               <div key={notice.id} className="p-5 space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
@@ -280,7 +303,7 @@ export function DuplicatesView({
                           Album: {t.matchedRelease?.title ?? t.album} ({t.year})
                         </div>
                         <div className="font-mono text-slate-400 truncate">
-                          {formatCodecLabel(t.codec, t.extension)} · {t.bitrateKbps} kbps ·{' '}
+                          {formatCodecLabel(t.codec, t.extension)} · {t.bitrateKbps || 0} kbps ·{' '}
                           {t.sourceRelativePath}
                         </div>
                       </div>
@@ -289,6 +312,20 @@ export function DuplicatesView({
                 </div>
               </div>
             ))}
+            {crossAlbumNotices.length > visibleNotices && (
+              <div className="px-5 py-3 bg-[#111927] flex items-center justify-between gap-3 text-xs">
+                <span className="font-mono text-slate-400">
+                  Zeige {visibleNotices} von {crossAlbumNotices.length} Hinweisen
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setVisibleNotices((n) => n + 30)}
+                  className="text-sky-300 font-medium hover:text-sky-200"
+                >
+                  Weitere 30 anzeigen
+                </button>
+              </div>
+            )}
           </div>
         )}
       </section>

@@ -17,6 +17,8 @@ export function ArtistDedupeView({
 }: ArtistDedupeViewProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
+  const [visibleFuzzy, setVisibleFuzzy] = useState(50);
+  const [visibleAutoMerged, setVisibleAutoMerged] = useState(50);
 
   const fuzzyClusters = clusters.filter((c) => c.rule === 'fuzzy_suggestion');
   const openFuzzyCount = fuzzyClusters.filter((c) => c.status === 'needs_review').length;
@@ -94,7 +96,7 @@ export function ArtistDedupeView({
           </div>
         ) : (
           <div className="divide-y divide-[#243044] bg-[#151E2E] border border-[#243044] rounded-lg">
-            {fuzzyClusters.map((cluster) => (
+            {fuzzyClusters.slice(0, visibleFuzzy).map((cluster) => (
               <div
                 key={cluster.id}
                 className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
@@ -191,6 +193,20 @@ export function ArtistDedupeView({
                 </div>
               </div>
             ))}
+            {fuzzyClusters.length > visibleFuzzy && (
+              <div className="px-5 py-3 bg-[#111927] flex items-center justify-between gap-3 text-xs">
+                <span className="font-mono text-slate-400">
+                  Zeige {visibleFuzzy} von {fuzzyClusters.length} Vorschlägen
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setVisibleFuzzy((n) => n + 50)}
+                  className="text-sky-300 font-medium hover:text-sky-200"
+                >
+                  Weitere 50 anzeigen
+                </button>
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -250,7 +266,7 @@ export function ArtistDedupeView({
             Automatisch zusammengeführt (nur MBID &amp; exakte Normalisierung)
           </h3>
           <div className="bg-[#151E2E] border border-[#243044] rounded-lg divide-y divide-[#243044]">
-            {autoMerged.map((c) => (
+            {autoMerged.slice(0, visibleAutoMerged).map((c) => (
               <div key={c.id} className="p-4 space-y-1 text-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-semibold text-slate-100">{c.canonicalName}</span>
@@ -260,6 +276,20 @@ export function ArtistDedupeView({
                 <div className="text-slate-400">{c.explanation}</div>
               </div>
             ))}
+            {autoMerged.length > visibleAutoMerged && (
+              <div className="px-4 py-3 bg-[#111927] flex items-center justify-between gap-3 text-xs">
+                <span className="font-mono text-slate-400">
+                  Zeige {visibleAutoMerged} von {autoMerged.length}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setVisibleAutoMerged((n) => n + 50)}
+                  className="text-sky-300 font-medium hover:text-sky-200"
+                >
+                  Weitere 50 anzeigen
+                </button>
+              </div>
+            )}
           </div>
         </section>
       </div>

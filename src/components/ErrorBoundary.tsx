@@ -15,6 +15,33 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     errorMessage: '',
   };
 
+  private handleWindowError = (event: ErrorEvent) => {
+    const msg = event.error?.message || event.message || 'Unerwarteter Laufzeitfehler.';
+    if (msg.toLowerCase().includes('resizeobserver')) return;
+    this.setState({ hasError: true, errorMessage: msg });
+  };
+
+  private handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+    const reason = event.reason;
+    const msg =
+      reason instanceof Error
+        ? reason.message
+        : typeof reason === 'string'
+          ? reason
+          : 'Unbehandelte asynchrone Ausnahme.';
+    this.setState({ hasError: true, errorMessage: msg });
+  };
+
+  componentDidMount() {
+    window.addEventListener('error', this.handleWindowError);
+    window.addEventListener('unhandledrejection', this.handleUnhandledRejection);
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener('error', this.handleWindowError);
+    window.removeEventListener('unhandledrejection', this.handleUnhandledRejection);
+  }
+
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return {
       hasError: true,

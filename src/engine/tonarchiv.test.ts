@@ -24,6 +24,7 @@ import {
   isVideoExtension,
   mapParsedCodec,
 } from './localFolderScanner';
+import { normalizeBackendState } from './apiClient';
 import { AlbumReleaseCandidate, AudioTrack, DEFAULT_CONFIG } from '../types/tonarchiv';
 
 // Minimal isolated factory strictly for unit tests (never imported by production code)
@@ -638,3 +639,141 @@ test('Legacy backend state payload with string tracklist entries and missing mat
   assert.equal(res.trackPlans.get('legacy-1')?.classification, 'album_track');
   assert.ok(res.trackPlans.get('legacy-1')?.targetRelativePath.startsWith('Lossless/Daft Punk/'));
 });
+
+test('normalizeBackendState + evaluateLibraryPlan survives hostile malformed fields and processes 3,000 tracks / 1,200 artists fast (<500ms)', () => {
+  // 1) Hostile malformed payload with nulls, missing nested objects, non-array lists, string tracklists
+  const hostileRaw = {
+    mode1Completed: true,
+    tracks: [
+      {
+        id: 'hostile-1',
+        fileName: null,
+        extension: null,
+        sourceDir: null,
+        sourceRelativePath: null,
+        sizeBytes: 'not-a-number',
+        mtimeIso: null,
+        codec: null,
+        sampleRateHz: null,
+        bitrateKbps: null,
+        artist: null,
+        albumArtist: undefined,
+        title: null,
+        album: null,
+        year: 2023,
+        trackNumber: 3,
+        originalTags: null,
+        cover: null,
+        lyrics: null,
+        acoustidConfidence: null,
+        matchedRelease: {
+          releaseId: 'rel-h1',
+          title: 'Broken Release',
+          albumArtist: null,
+          year: 2023,
+          tracklist: ['Legacy String Entry', null, { title: 'Obj Entry' }],
+        },
+        availableReleases: [null, { title: 'Partial', tracklist: 'bad' }],
+      },
+      null,
+      'not-an-object',
+    ],
+    companions: 'not-an-array',
+    leftovers: null,
+    queue: { status: 'running', processedCount: 392, totalCount: 2622, errors: [null, 'err-1'] },
+    journal: { entries: null, removedEmptyDirs: 'bad' },
+  };
+
+  const sanitizedHostile = normalizeBackendState(hostileRaw);
+  assert.ok(sanitizedHostile);
+  assert.equal(sanitizedHostile.tracks.length, 1);
+  assert.equal(sanitizedHostile.tracks[0].id, 'hostile-1');
+  assert.equal(sanitizedHostile.tracks[0].originalTags.title, '');
+  assert.equal(sanitizedHostile.tracks[0].cover.status, 'missing');
+  assert.equal(sanitizedHostile.tracks[0].lyrics.status, 'missing');
+  assert.ok(sanitizedHostile.queue);
+  assert.equal(sanitizedHostile.queue.errors.length, 1);
+  assert.equal(sanitizedHostile.queue.errors[0].message, 'err-1');
+
+  const hostilePlan = evaluateLibraryPlan(
+    sanitizedHostile.tracks,
+    sanitizedHostile.companions,
+    sanitizedHostile.leftovers,
+    DEFAULT_CONFIG,
+    { decisions: {}, renamedCanonical: {} },
+    { decisions: {}, selectedOriginals: {} }
+  );
+  assert.equal(hostilePlan.trackPlans.size, 1);
+
+  // 2) 3,000-track / 1,200-unique-artist stress benchmark (must never hang mobile main thread)
+  const rawBigTracks = [];
+  for (let i = 0; i < 3000; i += 1) {
+    const artistIdx = i % 1200;
+    const baseArtist =
+      artistIdx % 40 === 0
+        ? `DJ Artist ${artistIdx}`
+        : artistIdx % 40 === 1
+          ? `Artist ${artistIdx - 1}`
+          : `Künstler ${artistIdx} Band`;
+    const albumIdx = i % 400;
+    rawBigTracks.push({
+      id: `trk-${i}`,
+      fileName: `0${(i % 9) + 1} - Song ${i}.flac`,
+      extension: i % 3 === 0 ? '.mp3' : '.flac',
+      sourceDir: `album_${albumIdx}`,
+      sourceRelativePath: `album_${albumIdx}/0${(i % 9) + 1} - Song ${i}.${i % 3 === 0 ? 'mp3' : 'flac'}`,
+      sizeBytes: 25_000_000,
+      mtimeIso: '2024-01-01T00:00:00Z',
+      durationSec: 215,
+      codec: i % 3 === 0 ? 'mp3' : 'flac',
+      sampleRateHz: 44100,
+      bitDepth: i % 3 === 0 ? null : 16,
+      bitrateKbps: i % 3 === 0 ? 320 : 950,
+      artist: baseArtist,
+      albumArtist: baseArtist,
+      title: `Song ${i}`,
+      album: `Album ${albumIdx}`,
+      year: '2022',
+      trackNumber: String((i % 12) + 1).padStart(2, '0'),
+      acoustidConfidence: i % 5 === 0 ? 0.65 : 0.96,
+      mbRecordingId: i % 4 === 0 ? `rec-${i % 1500}` : null,
+      matchedRelease:
+        i % 5 === 0
+          ? null
+          : {
+              releaseId: `rel-${albumIdx}`,
+              title: `Album ${albumIdx}`,
+              albumArtist: baseArtist,
+              year: '2022',
+              country: 'DE',
+              format: 'CD',
+              trackCount: 12,
+              isCompilation: false,
+              isRemixAlbum: false,
+              matchScore: 0.94,
+              tracklist: [{ position: 1, title: `Song ${i}`, durationSec: 215 }],
+            },
+      inMatchedReleaseTracklist: i % 5 !== 0,
+    });
+  }
+
+  const t0 = performance.now();
+  const normalizedBig = normalizeBackendState({ tracks: rawBigTracks });
+  assert.ok(normalizedBig);
+  const bigPlan = evaluateLibraryPlan(
+    normalizedBig.tracks,
+    [],
+    [],
+    DEFAULT_CONFIG,
+    { decisions: {}, renamedCanonical: {} },
+    { decisions: {}, selectedOriginals: {} }
+  );
+  const elapsedMs = performance.now() - t0;
+
+  assert.equal(bigPlan.trackPlans.size, 3000);
+  assert.ok(
+    elapsedMs < 500,
+    `Expected 3,000 tracks / 1,200 artists to evaluate in <500ms, took ${elapsedMs.toFixed(1)}ms`
+  );
+});
+

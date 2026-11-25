@@ -1,4 +1,5 @@
 import { FolderTree, ShieldAlert } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import {
   AudioTrack,
   CompanionFile,
@@ -21,18 +22,21 @@ export function RulesAndFoldersView({
   companions,
   onChangeConfig,
 }: RulesAndFoldersViewProps) {
-  // Build sorted unique directory tree lines from live trackPlans + companions
-  const treePaths = new Set<string>();
-  for (const track of tracks) {
-    const plan = trackPlans.get(track.id);
-    if (!plan) continue;
-    treePaths.add(plan.targetRelativePath);
-  }
-  for (const c of companions) {
-    if (c.targetPath) treePaths.add(c.targetPath);
-  }
+  const [visiblePaths, setVisiblePaths] = useState(150);
 
-  const sortedPaths = Array.from(treePaths).sort((a, b) => a.localeCompare(b));
+  // Build sorted unique directory tree lines from live trackPlans + companions
+  const sortedPaths = useMemo(() => {
+    const treePaths = new Set<string>();
+    for (const track of tracks) {
+      const plan = trackPlans.get(track.id);
+      if (!plan) continue;
+      treePaths.add(plan.targetRelativePath);
+    }
+    for (const c of companions) {
+      if (c.targetPath) treePaths.add(c.targetPath);
+    }
+    return Array.from(treePaths).sort((a, b) => a.localeCompare(b));
+  }, [tracks, trackPlans, companions]);
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
@@ -379,24 +383,40 @@ export function RulesAndFoldersView({
               </p>
             </div>
           ) : (
-            sortedPaths.map((p) => {
-              const colorClass = p.startsWith('Lossless/')
-                ? 'text-emerald-300'
-                : p.startsWith('DJ-Remixes/') || p.includes('/DJ-Remixes/')
-                  ? 'text-sky-300'
-                  : p.startsWith('_Duplikate/')
-                    ? 'text-amber-300'
-                    : p.startsWith('_Review/')
-                      ? 'text-amber-200'
-                      : p.startsWith('Lossy/Low-Quality/')
-                        ? 'text-red-300'
-                        : 'text-slate-300';
-              return (
-                <div key={p} className={`${colorClass} truncate`} title={p}>
-                  /{p}
+            <>
+              {sortedPaths.slice(0, visiblePaths).map((p) => {
+                const colorClass = p.startsWith('Lossless/')
+                  ? 'text-emerald-300'
+                  : p.startsWith('DJ-Remixes/') || p.includes('/DJ-Remixes/')
+                    ? 'text-sky-300'
+                    : p.startsWith('_Duplikate/')
+                      ? 'text-amber-300'
+                      : p.startsWith('_Review/')
+                        ? 'text-amber-200'
+                        : p.startsWith('Lossy/Low-Quality/')
+                          ? 'text-red-300'
+                          : 'text-slate-300';
+                return (
+                  <div key={p} className={`${colorClass} truncate`} title={p}>
+                    /{p}
+                  </div>
+                );
+              })}
+              {sortedPaths.length > visiblePaths && (
+                <div className="pt-2 flex items-center justify-between gap-2 font-sans text-xs text-slate-400 border-t border-[#243044]">
+                  <span>
+                    Zeige {visiblePaths} von {sortedPaths.length} Pfaden
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setVisiblePaths((n) => n + 150)}
+                    className="text-sky-300 hover:text-sky-200 font-medium"
+                  >
+                    + 150 Pfade laden
+                  </button>
                 </div>
-              );
-            })
+              )}
+            </>
           )}
         </div>
 
