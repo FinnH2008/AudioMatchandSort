@@ -2,7 +2,7 @@ node_modules/
 build/
 dist/
 coverage/
-config/
+/config/
 .playwright-cli/
 __pycache__/
 *.pyc

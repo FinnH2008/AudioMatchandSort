@@ -719,11 +719,11 @@ export function LibraryView({
         <>
           {/* Active Production Source Strip */}
           <div className="bg-[#151E2E] border border-[#243044] rounded-lg px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex flex-wrap items-center gap-2 text-slate-300">
+            <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-1 sm:gap-2 text-slate-300">
               <span className="font-semibold text-slate-100">
                 Quelle: {activeSourceLabel || config.hostMusicDir}
               </span>
-              <span className="text-slate-600">·</span>
+              <span className="hidden sm:inline text-slate-600">·</span>
               <span className="font-mono text-slate-400">
                 {backendConnected
                   ? 'FastAPI Docker-Backend (Lese- & Schreibzugriff)'
@@ -734,7 +734,7 @@ export function LibraryView({
               <button
                 type="button"
                 onClick={() => folderInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-[#243044] bg-[#0F172A] text-slate-200 hover:border-sky-400 whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-200 hover:border-sky-400 whitespace-nowrap"
               >
                 <FolderOpen className="h-3.5 w-3.5" />
                 <span>Ordner wechseln</span>
@@ -743,7 +743,7 @@ export function LibraryView({
                 <button
                   type="button"
                   onClick={onClearLoadedLibrary}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-[#243044] bg-[#0F172A] text-slate-400 hover:text-red-300 hover:border-red-400/50 whitespace-nowrap"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-400 hover:text-red-300 hover:border-red-400/50 whitespace-nowrap"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   <span>Leeren</span>
@@ -762,14 +762,14 @@ export function LibraryView({
                 onChange={(e) => onSearchChange(e.target.value)}
                 placeholder="Suche nach Künstler, Titel, Codec, Pfad …"
                 aria-label="Bibliothek durchsuchen"
-                className="w-full rounded-md bg-[#151E2E] border border-[#243044] pl-9 pr-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
+                className="w-full min-h-[42px] rounded-md bg-[#151E2E] border border-[#243044] pl-9 pr-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
               />
             </div>
 
             <div
               role="group"
               aria-label="Bibliotheksfilter"
-              className="flex flex-wrap items-center gap-1 bg-[#151E2E] border border-[#243044] rounded-md p-1"
+              className="flex flex-nowrap overflow-x-auto sm:flex-wrap items-center gap-1 bg-[#151E2E] border border-[#243044] rounded-md p-1 max-w-full"
             >
               {filterButtons.map((btn) => {
                 const active = activeFilter === btn.id;
@@ -778,7 +778,7 @@ export function LibraryView({
                     key={btn.id}
                     type="button"
                     onClick={() => onFilterChange(btn.id)}
-                    className={`px-2.5 py-1.5 rounded text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                    className={`px-3 py-2 sm:px-2.5 sm:py-1.5 min-h-[38px] sm:min-h-0 rounded text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
                       active
                         ? 'bg-sky-400/15 text-sky-300'
                         : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
@@ -792,7 +792,7 @@ export function LibraryView({
             </div>
           </div>
 
-          {/* High-Density Track Table */}
+          {/* High-Density Track List (Mobile Cards < md, Desktop Table >= md) */}
           <section className="bg-[#151E2E] border border-[#243044] rounded-lg overflow-hidden">
             {filteredTracks.length === 0 ? (
               <div className="py-12 px-6 text-center space-y-3">
@@ -805,19 +805,107 @@ export function LibraryView({
                     onSearchChange('');
                     onFilterChange('all');
                   }}
-                  className="px-4 py-2 rounded-md bg-sky-400/15 text-sky-300 text-xs font-medium hover:bg-sky-400/25"
+                  className="px-4 py-2.5 min-h-[44px] rounded-md bg-sky-400/15 text-sky-300 text-xs font-medium hover:bg-sky-400/25"
                 >
                   Filter zurücksetzen
                 </button>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[880px] table-fixed text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="bg-[#111927] border-b border-[#243044] text-slate-400">
-                      <th className="w-[24%] py-3 pl-4 pr-3 font-medium">
-                        Track &amp; Album-Künstler
-                      </th>
+              <>
+                {/* Mobile Touch-First Track Card List */}
+                <div className="md:hidden divide-y divide-[#243044]">
+                  {filteredTracks.map((track) => {
+                    const plan = trackPlans.get(track.id)!;
+                    const statusText =
+                      track.status === 'moved'
+                        ? 'Verschoben'
+                        : track.status === 'tagged'
+                          ? 'Getaggt'
+                          : track.status === 'skipped_artist_conflict'
+                            ? 'Übersprungen'
+                            : plan.hasOpenArtistConflict
+                              ? 'Künstler offen'
+                              : mode1Completed
+                                ? 'Analysiert'
+                                : 'Offen';
+                    const classLabel = plan.isDuplicateToMove
+                      ? 'Duplikat → _Duplikate/'
+                      : plan.classification === 'dj_remix'
+                        ? 'DJ-Remix (geschützt)'
+                        : plan.classification === 'review_no_release_match'
+                          ? 'Review (kein Release-Match)'
+                          : plan.classification === 'review_low_confidence'
+                            ? `Review (${Math.round(track.acoustidConfidence * 100)} %)`
+                            : plan.albumQuality === 'lossless'
+                              ? 'Lossless-Album'
+                              : plan.albumQuality === 'lossy_low'
+                                ? 'Lossy Low-Quality'
+                                : 'Lossy-Album';
+                    const classColor = plan.isDuplicateToMove
+                      ? 'text-amber-300'
+                      : plan.classification === 'dj_remix'
+                        ? 'text-sky-300'
+                        : plan.classification === 'review_low_confidence' ||
+                            plan.classification === 'review_no_release_match'
+                          ? 'text-amber-400'
+                          : plan.albumQuality === 'lossy_low'
+                            ? 'text-red-400'
+                            : 'text-emerald-400';
+
+                    return (
+                      <button
+                        key={track.id}
+                        type="button"
+                        onClick={() => onSelectTrack(track.id)}
+                        aria-label={`Details für ${track.title} öffnen`}
+                        className="w-full text-left p-4 flex items-center justify-between gap-3 hover:bg-slate-800/40 active:bg-slate-800/60 transition-colors min-h-[72px]"
+                      >
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium text-sm text-slate-100 truncate">
+                              {track.title}
+                            </span>
+                            <span className="font-mono text-[11px] text-slate-400 shrink-0">
+                              {statusText}
+                            </span>
+                          </div>
+                          <div className="text-xs text-slate-400 truncate">
+                            {plan.resolvedAlbumArtist}
+                            {track.album ? ` · ${track.album}` : ' · Lose Datei'}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                            <span className="font-mono text-slate-300">
+                              {formatCodecLabel(track.codec, track.extension)}
+                            </span>
+                            <span className="text-slate-600">·</span>
+                            <span className="font-mono tabular-nums text-slate-400">
+                              {track.bitDepth ? `${track.bitDepth}b/` : ''}
+                              {(track.sampleRateHz / 1000).toFixed(1)}k · {track.bitrateKbps}k
+                            </span>
+                            <span className="text-slate-600">·</span>
+                            <span className={classColor}>{classLabel}</span>
+                          </div>
+                          <div className="font-mono text-[11px] text-slate-500 truncate">
+                            {plan.targetRelativePath}
+                          </div>
+                          {plan.collision !== 'none' && (
+                            <div className="text-[11px] text-red-400">{plan.collisionDetail}</div>
+                          )}
+                        </div>
+                        <ChevronRight className="h-4 w-4 text-slate-500 shrink-0" />
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Desktop High-Density Track Table */}
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full min-w-[880px] table-fixed text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-[#111927] border-b border-[#243044] text-slate-400">
+                        <th className="w-[24%] py-3 pl-4 pr-3 font-medium">
+                          Track &amp; Album-Künstler
+                        </th>
                       <th className="w-[17%] py-3 px-3 font-medium">Codec &amp; Qualität</th>
                       <th className="w-[19%] py-3 px-3 font-medium">Key · BPM · Medien</th>
                       <th className="w-[28%] py-3 px-3 font-medium">Einordnung &amp; Zielpfad</th>
@@ -969,6 +1057,7 @@ export function LibraryView({
                   </tbody>
                 </table>
               </div>
+              </>
             )}
           </section>
         </>
@@ -1058,12 +1147,12 @@ export function LibraryView({
       )}
 
       {/* Atomic Journal & Rollback Bar (Production Only — No Simulation Controls) */}
-      <section className="bg-[#151E2E] border border-[#243044] rounded-lg px-5 py-4 flex flex-wrap items-center justify-between gap-4 text-xs">
-        <div className="space-y-0.5">
+      <section className="bg-[#151E2E] border border-[#243044] rounded-lg px-4 sm:px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs">
+        <div className="space-y-0.5 min-w-0">
           <div className="font-semibold text-slate-200">
             Atomares Write-Ahead-Journal (rollback.json · Temp + fsync + Rename)
           </div>
-          <div className="text-slate-400 font-mono tabular-nums">
+          <div className="text-slate-400 font-mono tabular-nums break-words">
             Status: {journal.state} · Einträge: {journal.entries.length} · Gelöschte leere Ordner:{' '}
             {journal.removedEmptyDirs.length}
             {journal.backupConfirmedAt ? ' · Backup bestätigt' : ''}
@@ -1073,7 +1162,7 @@ export function LibraryView({
           <button
             type="button"
             onClick={onRollbackJournal}
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md border border-red-500/40 bg-red-500/10 text-red-300 font-medium hover:bg-red-500/20 whitespace-nowrap"
+            className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md border border-red-500/40 bg-red-500/10 text-red-300 font-medium hover:bg-red-500/20 whitespace-nowrap"
           >
             <RotateCcw className="h-3.5 w-3.5" />
             <span>Lauf rückgängig machen (Pfade + Original-Tags)</span>

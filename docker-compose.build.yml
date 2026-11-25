@@ -1,0 +1,10 @@
+# Optionales Override-File, falls du das Image lokal statt ueber GHCR bauen moechtest:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  tonarchiv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_ESSENTIA: "${ENABLE_ESSENTIA:-false}"
+    pull_policy: build

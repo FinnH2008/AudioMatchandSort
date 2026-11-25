@@ -95,11 +95,11 @@ export function DuplicatesView({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 shrink-0 w-full sm:w-auto">
                     <button
                       type="button"
                       onClick={() => onSetDecision(group.id, 'confirmed')}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap ${
+                      className={`flex-1 sm:flex-none min-h-[42px] sm:min-h-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 sm:py-1.5 rounded-md text-xs font-medium whitespace-nowrap ${
                         group.decision === 'confirmed'
                           ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                           : 'bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300'
@@ -113,7 +113,7 @@ export function DuplicatesView({
                     <button
                       type="button"
                       onClick={() => onSetDecision(group.id, 'keep_both')}
-                      className={`px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap border ${
+                      className={`flex-1 sm:flex-none min-h-[42px] sm:min-h-0 px-3 py-2 sm:py-1.5 rounded-md text-xs font-medium whitespace-nowrap border ${
                         group.decision === 'keep_both'
                           ? 'border-sky-400 bg-sky-400/15 text-sky-300'
                           : 'border-[#243044] bg-[#0F172A] text-slate-300 hover:border-slate-500'
@@ -124,7 +124,54 @@ export function DuplicatesView({
                   </div>
                 </div>
 
-                <div className="overflow-x-auto">
+                {/* Mobile Duplicate Candidates */}
+                <div className="md:hidden divide-y divide-[#243044]">
+                  {group.trackIds.map((tid) => {
+                    const track = trackById.get(tid);
+                    if (!track) return null;
+                    const isOriginal = group.selectedOriginalId === tid;
+                    const keepAll = group.decision === 'keep_both';
+                    return (
+                      <div key={tid} className="p-4 space-y-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">
+                            {keepAll ? (
+                              <span className="text-sky-300">Bleibt im Hauptbaum</span>
+                            ) : isOriginal ? (
+                              <span className="text-emerald-400">Original (Hauptbaum)</span>
+                            ) : (
+                              <span className="text-amber-400">→ _Duplikate/</span>
+                            )}
+                          </span>
+                          <span className="font-mono text-slate-400">
+                            {formatMb(track.sizeBytes)} · {track.mtimeIso.slice(0, 10)}
+                          </span>
+                        </div>
+                        <div className="font-mono tabular-nums text-slate-200">
+                          {formatCodecLabel(track.codec, track.extension)} ·{' '}
+                          {track.bitDepth ? `${track.bitDepth}b/` : ''}
+                          {(track.sampleRateHz / 1000).toFixed(1)}k · {track.bitrateKbps} kbps ·{' '}
+                          {countCompleteTags(track)}/10 Tags
+                        </div>
+                        <div className="font-mono text-slate-400 truncate">
+                          {track.sourceRelativePath}
+                        </div>
+                        {!isOriginal && !keepAll && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectOriginal(group.id, tid)}
+                            className="w-full min-h-[42px] px-3 py-2 rounded border border-[#243044] bg-[#0F172A] text-slate-200 hover:border-sky-400 hover:text-sky-300 font-medium"
+                          >
+                            Als Original wählen
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Desktop Duplicate Table */}
+                <div className="hidden md:block overflow-x-auto">
                   <table className="w-full min-w-[820px] table-fixed text-left text-xs">
                     <thead className="bg-[#111927] text-slate-400 border-b border-[#243044]">
                       <tr>

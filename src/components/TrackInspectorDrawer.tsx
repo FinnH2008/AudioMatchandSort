@@ -223,15 +223,15 @@ export function TrackInspectorDrawer({
       <div className="fixed inset-0" onClick={onClose} aria-hidden="true" />
       <div className="relative z-10 w-full max-w-2xl h-full bg-[#151E2E] border-l border-[#243044] flex flex-col overflow-hidden">
         {/* Drawer Header */}
-        <div className="px-6 py-5 border-b border-[#243044] flex items-start justify-between gap-4">
+        <div className="px-4 sm:px-6 py-4 sm:py-5 border-b border-[#243044] flex items-start justify-between gap-3 sm:gap-4">
           <div className="min-w-0 space-y-1">
             <h2
               id="inspector-drawer-title"
-              className="font-display text-lg font-semibold text-slate-50 truncate"
+              className="font-display text-base sm:text-lg font-semibold text-slate-50 truncate"
             >
               {track.title}
             </h2>
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
               <span className="text-slate-200">{track.artist}</span>
               <span aria-hidden="true">·</span>
               <span className="font-mono">{formatCodecLabel(track.codec, track.extension)}</span>
@@ -250,7 +250,7 @@ export function TrackInspectorDrawer({
             type="button"
             onClick={onClose}
             aria-label="Track-Inspektor schließen"
-            className="rounded-md p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+            className="min-h-[44px] min-w-[44px] -mr-2 -mt-1 flex items-center justify-center rounded-md text-slate-400 hover:bg-slate-800 hover:text-slate-100 shrink-0"
           >
             <X className="h-4 w-4" />
           </button>
@@ -260,7 +260,7 @@ export function TrackInspectorDrawer({
         <div
           role="tablist"
           aria-label="Inspektor-Reiter"
-          className="px-6 py-3 border-b border-[#243044] bg-[#111927] flex items-center gap-1"
+          className="px-4 sm:px-6 py-2.5 sm:py-3 border-b border-[#243044] bg-[#111927] flex items-center gap-1 overflow-x-auto"
         >
           {(
             [
@@ -275,7 +275,7 @@ export function TrackInspectorDrawer({
               role="tab"
               aria-selected={activeTab === tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+              className={`px-3 py-2 sm:py-1.5 min-h-[40px] sm:min-h-0 rounded-md text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
                 activeTab === tab.id
                   ? 'bg-sky-400/15 text-sky-300'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -287,7 +287,7 @@ export function TrackInspectorDrawer({
         </div>
 
         {/* Drawer Body */}
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6 text-sm">
+        <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-6 text-sm">
           {activeTab === 'overview' && (
             <>
               {/* Detachment / Release Tracklist Notice */}

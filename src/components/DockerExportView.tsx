@@ -9,7 +9,20 @@ interface DockerExportViewProps {
 }
 
 export function DockerExportView({ config }: DockerExportViewProps) {
-  const files = useMemo(() => generateDockerBundle(config), [config]);
+  const [repoSlug, setRepoSlug] = useState<string>('dein-github-user/tonarchiv');
+  const imageRef = useMemo(() => {
+    const cleaned = repoSlug
+      .trim()
+      .replace(/^https?:\/\/github\.com\//i, '')
+      .replace(/^ghcr\.io\//i, '')
+      .replace(/\.git$/i, '')
+      .replace(/^\/+|\/+$/g, '')
+      .toLowerCase();
+    if (!cleaned) return 'ghcr.io/dein-github-user/tonarchiv:latest';
+    return cleaned.includes(':') ? `ghcr.io/${cleaned}` : `ghcr.io/${cleaned}:latest`;
+  }, [repoSlug]);
+
+  const files = useMemo(() => generateDockerBundle(config, imageRef), [config, imageRef]);
   const [activeFilename, setActiveFilename] = useState<string>('docker-compose.yml');
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
   const [downloadingZip, setDownloadingZip] = useState(false);
@@ -48,29 +61,51 @@ export function DockerExportView({ config }: DockerExportViewProps) {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="bg-[#151E2E] border border-[#243044] rounded-lg p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <h2 className="font-display text-base font-semibold text-slate-100">
-            Single-Container FastAPI Docker-Paket (live aus deinen Regeln erzeugt)
-          </h2>
-          <p className="text-xs text-slate-400 max-w-3xl leading-relaxed">
-            Ein Container, ein Dockerfile, keine Node-Zwischenschicht: FastAPI liefert das gebaute
-            React-Dashboard sowie alle <span className="font-mono">/api/*</span>-Endpunkte, den
-            SQLite-Cache und das atomare Journal direkt aus. Alle Änderungen an Pfaden, PUID/PGID,
-            Konfidenz, DJ-Remix-Layout oder WAV-Schutz sind sofort enthalten.
-          </p>
+    <div className="space-y-5">
+      <div className="bg-[#151E2E] border border-[#243044] rounded-lg p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h2 className="font-display text-base font-semibold text-slate-100">
+              Plug-and-Play Docker-Image (einfach pullen &amp; ENV eintragen)
+            </h2>
+            <p className="text-xs text-slate-400 max-w-3xl leading-relaxed">
+              GitHub Actions baut das Multi-Arch-Image (<span className="font-mono">amd64/arm64</span>)
+              automatisch auf <span className="font-mono">ghcr.io</span>. Auf deinem Homeserver
+              oder in Portainer wird das fertige Image nur noch gepullt — kein lokales{' '}
+              <span className="font-mono">npm install</span>, kein Container-Build, alle Regeln und
+              API-Keys werden automatisch aus den Umgebungsvariablen geladen.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleDownloadZip}
+            disabled={downloadingZip}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] rounded-md bg-sky-400 text-slate-950 text-xs font-semibold hover:bg-sky-300 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Download className="h-4 w-4" />
+            <span>{downloadingZip ? 'Erstelle Archiv …' : 'Docker-Paket (.zip) herunterladen'}</span>
+          </button>
         </div>
 
-        <button
-          type="button"
-          onClick={handleDownloadZip}
-          disabled={downloadingZip}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-md bg-sky-400 text-slate-950 text-xs font-semibold hover:bg-sky-300 whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          <Download className="h-4 w-4" />
-          <span>{downloadingZip ? 'Erstelle Archiv …' : 'Docker-Paket (.zip) herunterladen'}</span>
-        </button>
+        <div className="pt-3 border-t border-[#243044] flex flex-col sm:flex-row sm:items-end gap-3">
+          <label className="flex-1 min-w-0 space-y-1">
+            <span className="block text-xs font-medium text-slate-300">
+              Dein GitHub-Repository (für das fertige GHCR Pull-Image)
+            </span>
+            <input
+              type="text"
+              value={repoSlug}
+              onChange={(e) => setRepoSlug(e.target.value)}
+              placeholder="benutzername/tonarchiv"
+              className="w-full min-h-[44px] px-3 py-2 rounded-md bg-[#0F172A] border border-[#243044] font-mono text-xs text-slate-100 focus:outline-none focus:border-sky-400"
+            />
+          </label>
+          <div className="sm:max-w-sm rounded-md bg-[#0F172A] border border-[#243044] px-3 py-2.5">
+            <div className="text-[11px] text-slate-400">Generierte Pull-Image-URL</div>
+            <div className="font-mono text-xs text-sky-300 truncate">{imageRef}</div>
+          </div>
+        </div>
       </div>
 
       {/* File Tabs + Code Viewer */}

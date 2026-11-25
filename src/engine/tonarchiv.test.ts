@@ -17,7 +17,6 @@ import {
   isCompilationAlbumGroup,
   selectBestAlbumRelease,
 } from './classifierAndPlanner';
-import { DEFAULT_CONFIG } from '../config/defaultConfig';
 import { generateDockerBundle } from './dockerGenerator';
 import {
   isAudioCandidateExtension,
@@ -25,7 +24,7 @@ import {
   isVideoExtension,
   mapParsedCodec,
 } from './localFolderScanner';
-import { AlbumReleaseCandidate, AudioTrack } from '../types/tonarchiv';
+import { AlbumReleaseCandidate, AudioTrack, DEFAULT_CONFIG } from '../types/tonarchiv';
 
 // Minimal isolated factory strictly for unit tests (never imported by production code)
 function makeTrack(overrides: Partial<AudioTrack> & { id: string }): AudioTrack {
@@ -547,17 +546,29 @@ test('Compilation release matcher searches exclusively compilation releases and 
   const picked = selectBestAlbumRelease('Bravo Hits 124', [bravoTrack], [REL_DISCOVERY, REL_BRAVO]);
   assert.equal(picked?.isCompilation, true);
 
-  const bundle = generateDockerBundle(DEFAULT_CONFIG);
-  assert.equal(bundle.length, 6);
+  const bundle = generateDockerBundle(DEFAULT_CONFIG, 'ghcr.io/meinuser/tonarchiv:latest');
+  assert.equal(bundle.length, 9);
   const compose = bundle.find((f) => f.filename === 'docker-compose.yml')!.content;
+  assert.ok(compose.includes('${TONARCHIV_IMAGE:-ghcr.io/meinuser/tonarchiv:latest}'));
+  assert.ok(compose.includes('pull_policy: always'));
+  assert.ok(compose.includes('AUTO_ANALYZE_ON_START'));
   assert.ok(compose.includes('${TONARCHIV_PORT:-7070}:7070'));
-  assert.ok(compose.includes('pull_policy: build'));
   assert.equal(compose.includes('env_file:'), false);
+  assert.equal(compose.includes('build:'), false);
+  const workflow = bundle.find((f) => f.filename === '.github/workflows/docker-publish.yml')!.content;
+  assert.ok(workflow.includes('ghcr.io'));
+  assert.ok(workflow.includes('linux/amd64,linux/arm64'));
   const dockerfile = bundle.find((f) => f.filename === 'Dockerfile')!.content;
+  assert.ok(dockerfile.includes('COPY package.json package-lock.json* .npmrc* ./'));
+  assert.ok(dockerfile.includes('--legacy-peer-deps'));
   assert.ok(dockerfile.includes('EXPOSE 7070'));
   assert.ok(dockerfile.includes('--port 7070'));
+  const npmrc = bundle.find((f) => f.filename === '.npmrc')!.content;
+  assert.ok(npmrc.includes('legacy-peer-deps=true'));
   const envEx = bundle.find((f) => f.filename === '.env.example')!.content;
+  assert.ok(envEx.includes('TONARCHIV_IMAGE=ghcr.io/meinuser/tonarchiv:latest'));
   assert.ok(envEx.includes('TONARCHIV_PORT=7070'));
+  assert.ok(envEx.includes('AUTO_ANALYZE_ON_START=true'));
   assert.ok(envEx.includes('ACOUSTID_API_KEY='));
   assert.ok(envEx.includes('DISCOGS_TOKEN='));
   const readme = bundle.find((f) => f.filename === 'README.md')!.content;

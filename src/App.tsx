@@ -9,8 +9,12 @@ import { RulesAndFoldersView } from './components/RulesAndFoldersView';
 import { NavSectionId, Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { TrackInspectorDrawer } from './components/TrackInspectorDrawer';
-import { DEFAULT_CONFIG } from './config/defaultConfig';
-import { fetchBackendHealth, fetchBackendState, postBackendAction } from './engine/apiClient';
+import {
+  fetchBackendHealth,
+  fetchBackendQueue,
+  fetchBackendState,
+  postBackendAction,
+} from './engine/apiClient';
 import { ArtistResolutionOverrides } from './engine/artistDedupe';
 import {
   computeNextModeAction,
@@ -27,6 +31,7 @@ import {
   AudioTrack,
   BackgroundQueueState,
   CompanionFile,
+  DEFAULT_CONFIG,
   DuplicateDecision,
   LeftoverFile,
   ManualAssignment,
@@ -163,6 +168,7 @@ export default function App() {
       }
       setConfig((prev) => ({
         ...prev,
+        ...(health.config ?? {}),
         containerMusicDir: health.music_dir || prev.containerMusicDir,
         essentiaAvailable: health.essentia_available,
         acoustidKeyConfigured: health.acoustid_configured,
@@ -174,11 +180,17 @@ export default function App() {
       const state = await fetchBackendState(targetUrl);
       if (state) {
         revokeCoverUrls();
+        if (state.config) {
+          setConfig((prev) => ({ ...prev, ...state.config }));
+        }
         setTracks(state.tracks ?? []);
         setCompanions(state.companions ?? []);
         setLeftovers(state.leftovers ?? []);
         setJournal(state.journal ?? INITIAL_JOURNAL);
         setCache(state.cache ?? INITIAL_CACHE);
+        if (state.queue) {
+          setQueue(state.queue);
+        }
         setMode1Completed(Boolean(state.mode1Completed));
         setMode2Completed(Boolean(state.mode2Completed));
         setMode3Completed(Boolean(state.mode3Completed));
@@ -203,6 +215,21 @@ export default function App() {
       void checkAndLoadBackend('', true);
     }
   }, [checkAndLoadBackend]);
+
+  // Live polling when FastAPI background queue (e.g. AUTO_ANALYZE_ON_START or Mode 1) is active
+  useEffect(() => {
+    if (!backendConnected) return;
+    if (queue.status !== 'running' && queue.status !== 'paused') return;
+    const timer = window.setInterval(async () => {
+      const liveQueue = await fetchBackendQueue(backendUrl);
+      if (!liveQueue) return;
+      setQueue(liveQueue);
+      if (liveQueue.status === 'completed' || liveQueue.status === 'idle') {
+        await checkAndLoadBackend(backendUrl, true);
+      }
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [backendConnected, backendUrl, queue.status, checkAndLoadBackend]);
 
   // Real local folder ingestion via music-metadata
   const handleImportLocalFiles = useCallback(
@@ -415,6 +442,64 @@ export default function App() {
     [config.embedCover, config.fetchLyrics, showToast, tracks]
   );
 
+  const buildTagPayload = useCallback(
+    (subset?: AudioTrack[]) => {
+      const sourceTracks = subset ?? tracks;
+      return sourceTracks
+        .filter((t) => {
+          const plan = evaluation.trackPlans.get(t.id);
+          if (!plan) return false;
+          if (subset) return true;
+          return !plan.hasOpenArtistConflict && !plan.willSkipInMode2;
+        })
+        .map((t) => {
+          const plan = evaluation.trackPlans.get(t.id);
+          return {
+            ...t,
+            albumArtist: plan?.resolvedAlbumArtist ?? t.albumArtist,
+            isDjRemix: plan?.classification === 'dj_remix' || t.manualAssignment === 'dj_remix',
+          };
+        });
+    },
+    [evaluation.trackPlans, tracks]
+  );
+
+  const buildMovePayload = useCallback(
+    (subset?: AudioTrack[]) => {
+      const sourceTracks = subset ?? tracks;
+      const trackMoves = sourceTracks
+        .map((t) => {
+          const plan = evaluation.trackPlans.get(t.id);
+          if (
+            !plan ||
+            !plan.targetRelativePath ||
+            plan.targetRelativePath === t.sourceRelativePath
+          ) {
+            return null;
+          }
+          return {
+            trackId: t.id,
+            fromPath: t.sourceRelativePath,
+            toPath: plan.targetRelativePath,
+          };
+        })
+        .filter((x): x is { trackId: string; fromPath: string; toPath: string } => x !== null);
+
+      const companionMoves = subset
+        ? []
+        : evaluation.evaluatedCompanions
+            .filter((c) => c.targetPath && c.targetPath !== c.sourceRelativePath)
+            .map((c) => ({
+              id: c.id,
+              fromPath: c.sourceRelativePath,
+              toPath: c.targetPath as string,
+            }));
+
+      return { moves: trackMoves, companionMoves };
+    },
+    [evaluation.evaluatedCompanions, evaluation.trackPlans, tracks]
+  );
+
   // Trigger real FastAPI backend mode when connected, or real local Mode 1 when in browser mode
   const handleTriggerPrimaryAction = async () => {
     if (!nextModeAction.enabled) return;
@@ -423,7 +508,9 @@ export default function App() {
     if (nextModeAction.mode === 'analyze') {
       if (backendConnected) {
         await postBackendAction(backendUrl, '/api/mode/analyze', { config });
-        await checkAndLoadBackend(backendUrl, true);
+        const q = await fetchBackendQueue(backendUrl);
+        if (q) setQueue(q);
+        showToast('Modus 1 (Analyse) im Docker-Container gestartet.');
       } else {
         void runLocalMode1Analysis(0);
       }
@@ -441,14 +528,24 @@ export default function App() {
         setBackupModalOpen(true);
         return;
       }
-      await postBackendAction(backendUrl, '/api/mode/tag', { config });
+      await postBackendAction(backendUrl, '/api/mode/tag', {
+        config,
+        tracks: buildTagPayload(),
+      });
       await checkAndLoadBackend(backendUrl, true);
+      showToast('Modus 2 (Taggen) über FastAPI-Container abgeschlossen.');
       return;
     }
 
     if (nextModeAction.mode === 'move') {
-      await postBackendAction(backendUrl, '/api/mode/move', { config });
+      const { moves, companionMoves } = buildMovePayload();
+      await postBackendAction(backendUrl, '/api/mode/move', {
+        config,
+        moves,
+        companionMoves,
+      });
       await checkAndLoadBackend(backendUrl, true);
+      showToast('Modus 3 (Atomares Verschieben) über FastAPI-Container abgeschlossen.');
       return;
     }
 
@@ -458,10 +555,15 @@ export default function App() {
         setBackupModalOpen(true);
         return;
       }
+      const { moves } = buildMovePayload(pendingReRunTracks);
       await postBackendAction(backendUrl, '/api/mode/rerun', {
+        config,
         trackIds: pendingReRunTracks.map((t) => t.id),
+        tracks: buildTagPayload(pendingReRunTracks),
+        moves,
       });
       await checkAndLoadBackend(backendUrl, true);
+      showToast('Gezielter Re-Run (Modus 2 + Modus 3) abgeschlossen.');
     }
   };
 
@@ -485,11 +587,20 @@ export default function App() {
     }
 
     if (modeToLaunch === 'tag') {
-      await postBackendAction(backendUrl, '/api/mode/tag', { config });
-    } else if (modeToLaunch === 'rerun') {
-      await postBackendAction(backendUrl, '/api/mode/rerun', {
-        trackIds: pendingReRunTracks.map((t) => t.id),
+      await postBackendAction(backendUrl, '/api/mode/tag', {
+        config,
+        tracks: buildTagPayload(),
       });
+      showToast('Modus 2 (Taggen) über FastAPI-Container abgeschlossen.');
+    } else if (modeToLaunch === 'rerun') {
+      const { moves } = buildMovePayload(pendingReRunTracks);
+      await postBackendAction(backendUrl, '/api/mode/rerun', {
+        config,
+        trackIds: pendingReRunTracks.map((t) => t.id),
+        tracks: buildTagPayload(pendingReRunTracks),
+        moves,
+      });
+      showToast('Gezielter Re-Run (Modus 2 + Modus 3) abgeschlossen.');
     }
     await checkAndLoadBackend(backendUrl, true);
   };
@@ -711,7 +822,7 @@ export default function App() {
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
         />
 
-        <main className="flex-1 px-4 lg:px-8 py-6 max-w-[1440px] w-full mx-auto">
+        <main className="flex-1 px-4 lg:px-8 pt-5 pb-20 lg:py-6 max-w-[1440px] w-full mx-auto">
           {activeSection === 'library' && (
             <LibraryView
               tracks={tracks}
@@ -829,7 +940,7 @@ export default function App() {
         <div
           role="status"
           aria-live="polite"
-          className="pointer-events-none fixed bottom-5 right-5 z-50 max-w-md bg-[#1B263B] border border-sky-400/40 text-slate-100 px-4 py-3 rounded-md text-xs shadow-lg"
+          className="pointer-events-none fixed bottom-18 lg:bottom-5 left-4 right-4 sm:left-auto sm:right-5 z-50 sm:max-w-md bg-[#1B263B] border border-sky-400/40 text-slate-100 px-4 py-3 rounded-md text-xs shadow-lg"
         >
           {toastMessage}
         </div>

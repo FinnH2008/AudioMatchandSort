@@ -161,7 +161,7 @@ export function ArtistDedupeView({
                   <button
                     type="button"
                     onClick={() => onSetClusterDecision(cluster.id, 'user_confirmed')}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap ${
+                    className={`min-h-[42px] sm:min-h-0 inline-flex items-center gap-1.5 px-3 py-2 sm:py-1.5 rounded-md text-xs font-medium whitespace-nowrap ${
                       cluster.status === 'user_confirmed'
                         ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                         : 'bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300'
@@ -173,7 +173,7 @@ export function ArtistDedupeView({
                   <button
                     type="button"
                     onClick={() => onSetClusterDecision(cluster.id, 'split_kept')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium border whitespace-nowrap ${
+                    className={`min-h-[42px] sm:min-h-0 px-3 py-2 sm:py-1.5 rounded-md text-xs font-medium border whitespace-nowrap ${
                       cluster.status === 'split_kept'
                         ? 'border-sky-400 bg-sky-400/15 text-sky-300'
                         : 'border-[#243044] bg-[#0F172A] text-slate-300 hover:border-slate-500'
@@ -184,7 +184,7 @@ export function ArtistDedupeView({
                   <button
                     type="button"
                     onClick={() => startEdit(cluster)}
-                    className="px-3 py-1.5 rounded-md text-xs font-medium border border-[#243044] bg-[#0F172A] text-slate-300 hover:border-slate-500 whitespace-nowrap"
+                    className="min-h-[42px] sm:min-h-0 px-3 py-2 sm:py-1.5 rounded-md text-xs font-medium border border-[#243044] bg-[#0F172A] text-slate-300 hover:border-slate-500 whitespace-nowrap"
                   >
                     Umbenennen
                   </button>

@@ -1,5 +1,6 @@
 import {
   AudioTrack,
+  BackgroundQueueState,
   CompanionFile,
   LeftoverFile,
   PipelineConfig,
@@ -10,12 +11,15 @@ import {
 export interface BackendHealthResponse {
   status: string;
   music_dir: string;
+  music_dir_exists?: boolean;
   essentia_available: boolean;
   acoustid_configured: boolean;
   discogs_configured: boolean;
   shazamio_enabled: boolean;
   wav_embed_media: boolean;
+  auto_analyze_on_start?: boolean;
   journal_state: RollbackJournal['state'];
+  config?: Partial<PipelineConfig>;
 }
 
 export interface BackendStateResponse {
@@ -24,6 +28,7 @@ export interface BackendStateResponse {
   leftovers: LeftoverFile[];
   journal: RollbackJournal;
   cache: SqliteCacheState;
+  queue?: BackgroundQueueState;
   mode1Completed: boolean;
   mode2Completed: boolean;
   mode3Completed: boolean;
@@ -62,6 +67,22 @@ export async function fetchBackendState(
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) return null;
     return (await res.json()) as BackendStateResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchBackendQueue(
+  baseUrl = ''
+): Promise<BackgroundQueueState | null> {
+  try {
+    const res = await fetch(`${normalizeBaseUrl(baseUrl)}/api/queue`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) return null;
+    return (await res.json()) as BackgroundQueueState;
   } catch {
     return null;
   }

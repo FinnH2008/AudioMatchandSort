@@ -395,3 +395,44 @@ export interface AnalysisReport {
   companionFileCount: number;
   untouchedVideoAndLeftoverCount: number;
 }
+
+export const DEFAULT_CONFIG: PipelineConfig = {
+  hostMusicDir: '/srv/Music Full Quality',
+  containerMusicDir: '/music',
+  configDir: '/config',
+  puid: 1000,
+  pgid: 1000,
+
+  minLossyBitrateKbps: 256,
+  separateLowQualityLossy: true,
+  mixedAlbumStrategy: 'lowest_quality',
+
+  djRemixLayout: 'root_folder',
+  enrichRemixEmptyFields: true,
+  keepReviewTracksInPlace: false,
+
+  confidenceThreshold: 0.8,
+  enableShazamFallback: true,
+  enableEssentia: true,
+  essentiaAvailable: false,
+  acoustidKeyConfigured: false,
+  discogsTokenConfigured: false,
+
+  keyFormat: 'both',
+  embedCover: true,
+  coverMaxSize: 1000,
+  saveFolderCoverJpg: true,
+  overwriteExistingCover: false,
+  fetchLyrics: true,
+  preferSyncedLrc: true,
+  embedLyricsInFile: true,
+  writeLrcSidecar: false,
+  writeReplayGain: true,
+  wavEmbedMedia: false,
+
+  maxPathLength: 240,
+  smbCaseSafe: true,
+  moveCompanionFiles: true,
+  cleanupEmptyDirs: true,
+  writeRollbackJournal: true,
+};

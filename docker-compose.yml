@@ -1,23 +1,30 @@
 services:
   tonarchiv:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        INSTALL_ESSENTIA: "${ENABLE_ESSENTIA:-false}"
-    pull_policy: build
+    # Vorgebautes Multi-Arch Image (AMD64 + ARM64) direkt pullen — kein lokaler Build / npm install noetig.
+    # Trage in Portainer oder .env deine eigene GHCR-URL ein:
+    #   TONARCHIV_IMAGE=ghcr.io/<dein-github-name>/<dein-repo>:latest
+    image: "${TONARCHIV_IMAGE:-ghcr.io/dein-github-user/tonarchiv:latest}"
+    pull_policy: always
     container_name: tonarchiv
     restart: unless-stopped
     ports:
       - "${TONARCHIV_PORT:-7070}:7070"
     environment:
+      # --- Benutzerrechte & Pfade (wichtig fuer NAS/SMB) ---
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
       MUSIC_DIR: "${MUSIC_DIR:-/srv/Music Full Quality}"
       CONFIG_DIR: "${CONFIG_DIR:-/config}"
+
+      # --- Autostart (Read-Only Analyse startet direkt beim Container-Start) ---
+      AUTO_ANALYZE_ON_START: "${AUTO_ANALYZE_ON_START:-true}"
+
+      # --- API-Keys & Kontakt (alle optional; MusicBrainz + LRCLIB + Cover Art laufen ohne Key) ---
       ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"
       DISCOGS_TOKEN: "${DISCOGS_TOKEN:-}"
       MUSICBRAINZ_CONTACT: "${MUSICBRAINZ_CONTACT:-}"
+
+      # --- Erkennung, Qualitaet & Regeln ---
       ENABLE_SHAZAMIO: "${ENABLE_SHAZAMIO:-true}"
       ENABLE_ESSENTIA: "${ENABLE_ESSENTIA:-false}"
       CONFIDENCE_THRESHOLD: "${CONFIDENCE_THRESHOLD:-0.80}"
@@ -27,6 +34,8 @@ services:
       DJ_REMIX_LAYOUT: "${DJ_REMIX_LAYOUT:-root_folder}"
       ENRICH_REMIX_EMPTY_FIELDS: "${ENRICH_REMIX_EMPTY_FIELDS:-true}"
       KEEP_REVIEW_IN_PLACE: "${KEEP_REVIEW_IN_PLACE:-false}"
+
+      # --- Tagging, Cover, Lyrics & Sicherheit ---
       KEY_FORMAT: "${KEY_FORMAT:-both}"
       EMBED_COVER: "${EMBED_COVER:-true}"
       COVER_MAX_SIZE: "${COVER_MAX_SIZE:-1000}"
@@ -45,5 +54,5 @@ services:
     volumes:
       # WICHTIG: Genau ein einzelner Mount fuer atomares Verschieben im selben Dateisystem
       - "${HOST_MUSIC_DIR:-/srv/Music Full Quality}:${MUSIC_DIR:-/srv/Music Full Quality}"
-      # Persistente SQLite-Cache-DB (cache.db) und atomares Journal (rollback.json)
+      # Persistente SQLite-Cache-DB (cache.db), State und atomares Journal (rollback.json)
       - "${HOST_CONFIG_DIR:-./config}:${CONFIG_DIR:-/config}"

@@ -7,17 +7,18 @@ export interface GeneratedDockerFile {
   content: string;
 }
 
-export function generateDockerBundle(config: PipelineConfig): GeneratedDockerFile[] {
+export function generateDockerBundle(
+  config: PipelineConfig,
+  imageRef = 'ghcr.io/dein-github-user/tonarchiv:latest'
+): GeneratedDockerFile[] {
   const djLayoutEnv = config.djRemixLayout === 'root_folder' ? 'root_folder' : 'split_by_quality';
+  const normalizedImage = imageRef.trim().toLowerCase() || 'ghcr.io/dein-github-user/tonarchiv:latest';
 
   const dockerCompose = `services:
   tonarchiv:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        INSTALL_ESSENTIA: "\${ENABLE_ESSENTIA:-${config.enableEssentia ? 'true' : 'false'}}"
-    pull_policy: build
+    # Vorgebautes Multi-Arch Image (AMD64 + ARM64) direkt pullen — kein lokaler Build / npm install noetig.
+    image: "\${TONARCHIV_IMAGE:-${normalizedImage}}"
+    pull_policy: always
     container_name: tonarchiv
     restart: unless-stopped
     ports:
@@ -27,6 +28,7 @@ export function generateDockerBundle(config: PipelineConfig): GeneratedDockerFil
       PGID: "\${PGID:-${config.pgid}}"
       MUSIC_DIR: "\${MUSIC_DIR:-${config.containerMusicDir}}"
       CONFIG_DIR: "\${CONFIG_DIR:-${config.configDir}}"
+      AUTO_ANALYZE_ON_START: "\${AUTO_ANALYZE_ON_START:-true}"
       ACOUSTID_API_KEY: "\${ACOUSTID_API_KEY:-}"
       DISCOGS_TOKEN: "\${DISCOGS_TOKEN:-}"
       MUSICBRAINZ_CONTACT: "\${MUSICBRAINZ_CONTACT:-}"
@@ -52,16 +54,74 @@ export function generateDockerBundle(config: PipelineConfig): GeneratedDockerFil
     volumes:
       # WICHTIG: Genau ein einzelner Mount fuer atomares Verschieben im selben Dateisystem
       - "\${HOST_MUSIC_DIR:-${config.hostMusicDir}}:\${MUSIC_DIR:-${config.containerMusicDir}}"
-      # Persistente SQLite-Cache-DB (cache.db) und atomares Journal (rollback.json)
+      # Persistente SQLite-Cache-DB (cache.db), State und atomares Journal (rollback.json)
       - "\${HOST_CONFIG_DIR:-./config}:\${CONFIG_DIR:-${config.configDir}}"
+`;
+
+  const dockerComposeBuild = `# Optionales Override fuer lokalen Build statt GHCR-Pull:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  tonarchiv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_ESSENTIA: "\${ENABLE_ESSENTIA:-${config.enableEssentia ? 'true' : 'false'}}"
+    pull_policy: build
+`;
+
+  const ghcrWorkflow = `name: Build & Publish TonArchiv Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/\${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: \${{ steps.meta.outputs.tags }}
+          labels: \${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 `;
 
   const dockerfile = `# Stage 1: Statisches React-Frontend bauen (direkt aus GitHub-Repo baubar)
 FROM node:22-slim AS frontend-builder
 WORKDIR /ui
-COPY package.json ./
-COPY package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+COPY package.json package-lock.json* .npmrc* ./
+RUN if [ -f package-lock.json ]; then npm ci --legacy-peer-deps; else npm install --legacy-peer-deps; fi
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
 RUN npm run build
@@ -127,8 +187,14 @@ shazamio>=0.7.0
 # Fehlende API-Keys deaktivieren nur die jeweilige Stufe (kein Absturz).
 # =============================================================================
 
+# Vorgebautes GHCR-Image (wird automatisch durch GitHub Actions erstellt)
+TONARCHIV_IMAGE=${normalizedImage}
+
 # Server-Port auf dem Homeserver
 TONARCHIV_PORT=7070
+
+# Read-Only Analyse beim Container-Start automatisch starten
+AUTO_ANALYZE_ON_START=true
 
 # Benutzer- & Gruppen-ID auf dem Host (id -u / id -g auf Linux/NAS pruefen)
 PUID=${config.puid}
@@ -601,8 +667,20 @@ Trage beide Werte in \`.env\` ein. Der Container startet den FastAPI-Prozess dir
     {
       filename: 'docker-compose.yml',
       language: 'yaml',
-      description: 'Single-Container Setup mit einem gemeinsamen Mount, PUID/PGID und persistentem /config-Volume',
+      description: 'Plug-and-Play Pull-Setup (kein lokaler Build/npm install noetig) mit Autostart & ENV-Variablen',
       content: dockerCompose,
+    },
+    {
+      filename: '.github/workflows/docker-publish.yml',
+      language: 'yaml',
+      description: 'GitHub Actions Workflow: baut automatisch Multi-Arch Images (AMD64/ARM64) auf ghcr.io',
+      content: ghcrWorkflow,
+    },
+    {
+      filename: 'docker-compose.build.yml',
+      language: 'yaml',
+      description: 'Optionales Override fuer lokalen Docker-Build statt GHCR-Pull',
+      content: dockerComposeBuild,
     },
     {
       filename: 'Dockerfile',
@@ -613,7 +691,7 @@ Trage beide Werte in \`.env\` ein. Der Container startet den FastAPI-Prozess dir
     {
       filename: 'backend/app.py',
       language: 'python',
-      description: 'FastAPI Single-Container Service (Port 7070) mit Journal, SQLite-Cache, Rate-Limiting, ffprobe & 3 Modi',
+      description: 'FastAPI Single-Container Service (Port 7070) mit ENV-Autokonfig, Autostart, Journal, Cache & 3 Modi',
       content: appPy,
     },
     {
@@ -625,13 +703,19 @@ Trage beide Werte in \`.env\` ein. Der Container startet den FastAPI-Prozess dir
     {
       filename: '.env.example',
       language: 'dotenv',
-      description: 'Alle Umgebungsvariablen inkl. PUID/PGID, API-Keys, Konfidenz-Gate und WAV-Schutz',
+      description: 'Alle Umgebungsvariablen inkl. TONARCHIV_IMAGE, PUID/PGID, API-Keys und Autostart',
       content: envExample,
+    },
+    {
+      filename: '.npmrc',
+      language: 'text',
+      description: 'Erlaubt Legacy-Peer-Dependencies fuer Vite/esbuild beim Docker-Build',
+      content: 'legacy-peer-deps=true\n',
     },
     {
       filename: 'README.md',
       language: 'markdown',
-      description: 'Anleitung mit Erstem Testlauf, Dateisystem/PUID-Hinweisen und Sicherheit & Empfehlungen',
+      description: 'Anleitung mit GHCR Pull-Deployment, Dateisystem/PUID-Hinweisen und Sicherheit & Empfehlungen',
       content: readmeMd,
     },
   ];
