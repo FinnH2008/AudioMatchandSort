@@ -170,6 +170,7 @@ export interface AudioTrack {
   taggedAt: string | null;
   movedToPath: string | null;
   skippedInMode2Reason: string | null;
+  lookupError?: string | null;
 }
 
 export interface CompanionFile {
@@ -332,7 +333,7 @@ export interface QueueErrorItem {
 }
 
 export interface BackgroundQueueState {
-  activeMode: WorkflowModeId | 'rerun' | null;
+  activeMode: WorkflowModeId | 'rerun' | 'retry_failed' | null;
   status: 'idle' | 'running' | 'paused' | 'completed' | 'error';
   processedCount: number;
   totalCount: number;

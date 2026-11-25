@@ -35,6 +35,7 @@ export type LibraryFilterId =
   | 'lossy_low'
   | 'dj_remix'
   | 'review'
+  | 'lookup_failed'
   | 'conflicts';
 
 interface LibraryViewProps {
@@ -73,6 +74,7 @@ interface LibraryViewProps {
   onResumeQueue: () => void;
   onResumeInterrupted: () => void;
   onRollbackJournal: () => void;
+  onRetryFailedLookups: (options?: { trackIds?: string[]; includeUnmatched?: boolean }) => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -117,6 +119,7 @@ export function LibraryView({
   onResumeQueue,
   onResumeInterrupted,
   onRollbackJournal,
+  onRetryFailedLookups,
 }: LibraryViewProps) {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const filesInputRef = useRef<HTMLInputElement | null>(null);
@@ -147,6 +150,16 @@ export function LibraryView({
     e.target.value = '';
   };
 
+  const lookupFailedTracks = useMemo(
+    () => tracks.filter((t) => Boolean(t.lookupError)),
+    [tracks]
+  );
+
+  const unmatchedTracks = useMemo(
+    () => tracks.filter((t) => !t.matchedRelease && !t.mbRecordingId),
+    [tracks]
+  );
+
   const filteredTracks = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return tracks.filter((track) => {
@@ -164,12 +177,16 @@ export function LibraryView({
       ) {
         return false;
       }
+      if (activeFilter === 'lookup_failed' && !track.lookupError) {
+        return false;
+      }
       if (
         activeFilter === 'conflicts' &&
         !plan.hasOpenArtistConflict &&
         plan.collision === 'none' &&
         !track.spectralWarningOnly &&
-        !track.detachedFromAlbum
+        !track.detachedFromAlbum &&
+        !track.lookupError
       ) {
         return false;
       }
@@ -183,7 +200,8 @@ export function LibraryView({
         String(track.fileName ?? '').toLowerCase().includes(q) ||
         String(track.codec ?? '').toLowerCase().includes(q) ||
         String(track.camelotKey ?? '').toLowerCase().includes(q) ||
-        String(plan.targetRelativePath ?? '').toLowerCase().includes(q)
+        String(plan.targetRelativePath ?? '').toLowerCase().includes(q) ||
+        String(track.lookupError ?? '').toLowerCase().includes(q)
       );
     });
   }, [tracks, trackPlans, activeFilter, searchQuery]);
@@ -193,7 +211,7 @@ export function LibraryView({
     [filteredTracks, visibleCount]
   );
 
-  const filterButtons: Array<{ id: LibraryFilterId; label: string; count: number }> = [
+  const filterButtons: Array<{ id: LibraryFilterId; label: string; count: number; warn?: boolean }> = [
     { id: 'all', label: 'Alle', count: report.totalAudioTracks },
     { id: 'lossless', label: 'Lossless', count: report.losslessCount },
     { id: 'lossy_high', label: 'Lossy Hoch', count: report.lossyHighCount },
@@ -204,6 +222,16 @@ export function LibraryView({
       label: 'Review',
       count: report.reviewLosslessCount + report.reviewLossyCount,
     },
+    ...(lookupFailedTracks.length > 0
+      ? [
+          {
+            id: 'lookup_failed' as LibraryFilterId,
+            label: 'MB-Abruf fehlgeschlagen',
+            count: lookupFailedTracks.length,
+            warn: true,
+          },
+        ]
+      : []),
     {
       id: 'conflicts',
       label: 'Hinweise',
@@ -211,7 +239,8 @@ export function LibraryView({
         report.skippedInMode2ArtistConflictCount +
         report.pathCollisionCount +
         report.fakeFlacWarningCount +
-        report.detachedForeignTrackCount,
+        report.detachedForeignTrackCount +
+        lookupFailedTracks.length,
     },
   ];
 
@@ -411,11 +440,13 @@ export function LibraryView({
                   Hintergrund-Queue:{' '}
                   {queue.activeMode === 'analyze'
                     ? 'Modus 1 (Analyse)'
-                    : queue.activeMode === 'tag'
-                      ? 'Modus 2 (Taggen)'
-                      : queue.activeMode === 'move'
-                        ? 'Modus 3 (Verschieben & Aufräumen)'
-                        : 'Gezielter Re-Run (Modus 2 + Modus 3)'}
+                    : queue.activeMode === 'retry_failed'
+                      ? 'Nachprüfung (MusicBrainz-Retry)'
+                      : queue.activeMode === 'tag'
+                        ? 'Modus 2 (Taggen)'
+                        : queue.activeMode === 'move'
+                          ? 'Modus 3 (Verschieben & Aufräumen)'
+                          : 'Gezielter Re-Run (Modus 2 + Modus 3)'}
                 </span>
                 <span className="text-slate-600">·</span>
                 <span
@@ -857,7 +888,21 @@ export function LibraryView({
                   : 'Lokaler Browser-Scan (Read-Only · Modus 2/3 über Docker-Container)'}
               </span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {lookupFailedTracks.length === 0 &&
+                unmatchedTracks.length > 0 &&
+                mode1Completed &&
+                queue.status !== 'running' &&
+                queue.status !== 'paused' && (
+                  <button
+                    type="button"
+                    onClick={() => onRetryFailedLookups({ includeUnmatched: true })}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 whitespace-nowrap"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <span>Ohne Treffer erneut abrufen ({unmatchedTracks.length})</span>
+                  </button>
+                )}
               <button
                 type="button"
                 onClick={() => folderInputRef.current?.click()}
@@ -878,6 +923,48 @@ export function LibraryView({
               )}
             </div>
           </div>
+
+          {/* Persistent Banner for tracks where MusicBrainz was unreachable */}
+          {lookupFailedTracks.length > 0 &&
+            queue.status !== 'running' &&
+            queue.status !== 'paused' && (
+              <section
+                aria-label="Fehlgeschlagene MusicBrainz-Abrufe"
+                className="bg-[#151E2E] border border-amber-500/45 rounded-lg p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-amber-300">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>
+                      {lookupFailedTracks.length} Tracks: MusicBrainz war beim Scan nicht erreichbar
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Diese Dateien wurden nicht beschädigt — sie wurden nur übersprungen und behalten
+                    vorerst ihre lokalen Tags (landen ohne Treffer in <span className="font-mono">_Review/</span>).
+                    Du kannst gezielt nur diese {lookupFailedTracks.length} Tracks noch einmal bei
+                    MusicBrainz abfragen, bevor du Modus 2 (Taggen) startest.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => onFilterChange('lookup_failed')}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2.5 min-h-[42px] rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 text-xs font-medium hover:border-amber-400/60 whitespace-nowrap"
+                  >
+                    <span>Dateien anzeigen</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRetryFailedLookups({ includeUnmatched: false })}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 min-h-[42px] rounded-md bg-amber-400 text-slate-950 text-xs font-semibold hover:bg-amber-300 whitespace-nowrap"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <span>Nur diese {lookupFailedTracks.length} erneut abrufen</span>
+                  </button>
+                </div>
+              </section>
+            )}
 
           {/* Search & Segmented Filter Controls */}
           <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
@@ -907,8 +994,12 @@ export function LibraryView({
                     onClick={() => onFilterChange(btn.id)}
                     className={`px-3 py-2 sm:px-2.5 sm:py-1.5 min-h-[38px] sm:min-h-0 rounded text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
                       active
-                        ? 'bg-sky-400/15 text-sky-300'
-                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                        ? btn.warn
+                          ? 'bg-amber-400/20 text-amber-300'
+                          : 'bg-sky-400/15 text-sky-300'
+                        : btn.warn
+                          ? 'text-amber-300/90 hover:text-amber-200 hover:bg-amber-400/10'
+                          : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
                     }`}
                   >
                     {btn.label}{' '}
@@ -1019,6 +1110,11 @@ export function LibraryView({
                           </div>
                           {plan.collision !== 'none' && (
                             <div className="text-[11px] text-red-400">{plan.collisionDetail}</div>
+                          )}
+                          {track.lookupError && (
+                            <div className="text-[11px] text-amber-400 truncate">
+                              {track.lookupError}
+                            </div>
                           )}
                         </div>
                         <ChevronRight className="h-4 w-4 text-slate-500 shrink-0" />
@@ -1155,6 +1251,11 @@ export function LibraryView({
                             </div>
                             {plan.collision !== 'none' && (
                               <div className="text-red-400 mt-0.5">{plan.collisionDetail}</div>
+                            )}
+                            {track.lookupError && (
+                              <div className="text-amber-400 mt-0.5 truncate" title={track.lookupError}>
+                                {track.lookupError}
+                              </div>
                             )}
                           </td>
 

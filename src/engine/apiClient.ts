@@ -199,6 +199,7 @@ export function normalizeBackendTrack(raw: unknown): AudioTrack | null {
     taggedAt: t.taggedAt ? String(t.taggedAt) : null,
     movedToPath: t.movedToPath ? String(t.movedToPath) : null,
     skippedInMode2Reason: t.skippedInMode2Reason ? String(t.skippedInMode2Reason) : null,
+    lookupError: t.lookupError ? String(t.lookupError) : null,
   };
 }
 

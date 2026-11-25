@@ -674,6 +674,7 @@ test('normalizeBackendState + evaluateLibraryPlan survives hostile malformed fie
           tracklist: ['Legacy String Entry', null, { title: 'Obj Entry' }],
         },
         availableReleases: [null, { title: 'Partial', tracklist: 'bad' }],
+        lookupError: 'MusicBrainz nicht erreichbar (übersprungen).',
       },
       null,
       'not-an-object',
@@ -688,6 +689,7 @@ test('normalizeBackendState + evaluateLibraryPlan survives hostile malformed fie
   assert.ok(sanitizedHostile);
   assert.equal(sanitizedHostile.tracks.length, 1);
   assert.equal(sanitizedHostile.tracks[0].id, 'hostile-1');
+  assert.equal(sanitizedHostile.tracks[0].lookupError, 'MusicBrainz nicht erreichbar (übersprungen).');
   assert.equal(sanitizedHostile.tracks[0].originalTags.title, '');
   assert.equal(sanitizedHostile.tracks[0].cover.status, 'missing');
   assert.equal(sanitizedHostile.tracks[0].lyrics.status, 'missing');

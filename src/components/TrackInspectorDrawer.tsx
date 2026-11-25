@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Disc, FileAudio, Music2, X } from 'lucide-react';
+import { AlertTriangle, Check, Disc, FileAudio, Music2, RefreshCw, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { formatCodecLabel } from '../engine/codecAndSanitizer';
 import {
@@ -13,6 +13,7 @@ interface TrackInspectorDrawerProps {
   track: AudioTrack | null;
   plan: EvaluatedTrackPlan | null;
   config: PipelineConfig;
+  queueBusy?: boolean;
   onClose: () => void;
   onSelectSource: (trackId: string, provider: SourceProvider) => void;
   onUpdateLyrics: (
@@ -32,6 +33,7 @@ interface TrackInspectorDrawerProps {
       trackNumber?: string;
     }
   ) => void;
+  onRetryTrackLookup?: (trackId: string) => void;
 }
 
 type DrawerTab = 'overview' | 'metadata' | 'lyrics';
@@ -40,10 +42,12 @@ export function TrackInspectorDrawer({
   track,
   plan,
   config,
+  queueBusy = false,
   onClose,
   onSelectSource,
   onUpdateLyrics,
   onApplyManualReviewAssignment,
+  onRetryTrackLookup,
 }: TrackInspectorDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>('overview');
   const [imgError, setImgError] = useState(false);
@@ -298,6 +302,30 @@ export function TrackInspectorDrawer({
         <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-6 text-sm">
           {activeTab === 'overview' && (
             <>
+              {/* MusicBrainz Lookup Error Notice + Targeted Single-Track Retry */}
+              {track.lookupError && (
+                <div className="bg-[#0F172A] border border-amber-500/50 rounded-md p-4 space-y-2.5">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-amber-300">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>MusicBrainz-Abruf beim Scan fehlgeschlagen</span>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    {track.lookupError} Die Datei blieb unverändert mit ihren lokalen Tags erhalten.
+                  </p>
+                  {onRetryTrackLookup && (
+                    <button
+                      type="button"
+                      disabled={queueBusy}
+                      onClick={() => onRetryTrackLookup(track.id)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[38px] rounded-md bg-amber-400 text-slate-950 text-xs font-semibold hover:bg-amber-300 disabled:opacity-50"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      <span>Diesen Track erneut bei MusicBrainz abrufen</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
               {/* Detachment / Release Tracklist Notice */}
               {track.detachReason && (
                 <div className="bg-[#0F172A] border border-amber-500/40 rounded-md p-4 space-y-1">

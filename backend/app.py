@@ -359,6 +359,7 @@ def _normalize_track_obj(t: Any) -> Optional[Dict[str, Any]]:
     t["camelotKey"] = str(t.get("camelotKey") or "—")
     t["manualAssignment"] = str(t.get("manualAssignment") or "none")
     t["status"] = str(t.get("status") or "pending")
+    t["lookupError"] = str(t["lookupError"]) if t.get("lookupError") else None
     t["originalTags"] = {
         "artist": str(orig.get("artist") or ""),
         "albumArtist": str(orig.get("albumArtist") or ""),
@@ -615,6 +616,7 @@ class AsyncRateLimiter:
 mb_limiter = AsyncRateLimiter(1.05)
 discogs_limiter = AsyncRateLimiter(1.05)
 acoustid_limiter = AsyncRateLimiter(0.35)
+deezer_limiter = AsyncRateLimiter(0.25)
 
 
 # ---------------------------------------------------------------------------
@@ -1086,24 +1088,26 @@ def _compute_fpcalc(path: Path) -> Optional[Tuple[int, str]]:
 
 
 def _http_get_json(url: str, headers: Dict[str, str], timeout: int = 12) -> Optional[Dict[str, Any]]:
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             resp = _HTTP_SESSION.get(url, headers=headers, timeout=timeout)
             if resp.status_code == 200:
                 return resp.json()
-            if resp.status_code in (429, 503) and attempt == 0:
-                time.sleep(1.5)
+            if resp.status_code in (429, 503) and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
                 continue
             return None
         except Exception:
-            if attempt == 0:
-                time.sleep(0.5)
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
                 continue
             return None
     return None
 
 
-async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], bool, Optional[str]]:
+async def lookup_track_metadata(
+    track: Dict[str, Any], cfg: Dict[str, Any], force_refresh: bool = False
+) -> Tuple[Dict[str, Any], bool, Optional[str]]:
     """Fuehrt gecachte, rate-limitierte Live-Abfragen fuer einen Track aus (Read-Only)."""
     artist = (track.get("artist") or "").strip()
     title = (track.get("title") or "").strip()
@@ -1112,21 +1116,26 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
         f"{artist.lower()}|{title.lower()}|{album.lower()}|{track.get('durationSec', 0)}".encode("utf-8")
     ).hexdigest()
 
-    cached_mb = cache_get("mb_release", cache_key)
+    cached_mb = None if force_refresh else cache_get("mb_release", cache_key)
     cache_hit = False
     candidates: List[Dict[str, Any]] = []
     available_releases: List[Dict[str, Any]] = []
     matched_release: Optional[Dict[str, Any]] = None
+    acoustid_fallback_release: Optional[Dict[str, Any]] = None
+    fallback_cover_url: Optional[str] = None
+    fallback_cover_source: str = "Cover Art Archive"
+    active_source: str = str(track.get("activeSource") or "musicbrainz")
     mb_recording_id = track.get("mbRecordingId")
     mb_artist_id = track.get("mbArtistId")
     acoustid_id = track.get("acoustidId")
     confidence = float(track.get("acoustidConfidence") or 0.0)
+    threshold = float(cfg.get("confidenceThreshold", CONFIDENCE_THRESHOLD))
     err_msg: Optional[str] = None
 
     # 5a. AcoustID Fingerprint-Lookup (wenn ACOUSTID_API_KEY konfiguriert)
-    if ACOUSTID_API_KEY and not acoustid_id:
+    if ACOUSTID_API_KEY and (not acoustid_id or force_refresh):
         fp_cache_key = hashlib.sha1(track["sourceRelativePath"].encode("utf-8")).hexdigest()
-        fp_cached = cache_get("fingerprint", fp_cache_key)
+        fp_cached = None if force_refresh else cache_get("fingerprint", fp_cache_key)
         if fp_cached is not None:
             cache_hit = True
             acoustid_id = fp_cached.get("acoustidId")
@@ -1134,6 +1143,8 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
                 mb_recording_id = fp_cached["mbRecordingId"]
             if fp_cached.get("score"):
                 confidence = max(confidence, float(fp_cached["score"]))
+            if isinstance(fp_cached.get("release"), dict):
+                acoustid_fallback_release = fp_cached["release"]
         else:
             full_path = safe_resolve_under_music(track["sourceRelativePath"])
             fp_res = await asyncio.to_thread(_compute_fpcalc, full_path)
@@ -1156,29 +1167,65 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
                     if rec_id:
                         mb_recording_id = rec_id
                     confidence = max(confidence, round(score, 2))
-                    cache_put(
-                        "fingerprint",
-                        fp_cache_key,
-                        {"acoustidId": acoustid_id, "mbRecordingId": mb_recording_id, "score": score},
-                    )
                     if recs:
                         rec0 = recs[0]
                         rec_artist = (
                             (rec0.get("artists") or [{}])[0].get("name") or artist
                         )
+                        rec_title = rec0.get("title") or title
+                        rgs = rec0.get("releasegroups") or []
+                        rg_album = album
+                        if rgs:
+                            rg0 = rgs[0]
+                            rg_album = rg0.get("title") or album
+                            rg_sec = [s.lower() for s in (rg0.get("secondarytypes") or [])]
+                            rg_is_comp = "compilation" in rg_sec
+                            acoustid_fallback_release = {
+                                "releaseId": f"acoustid-{rg0.get('id') or rec_id or 'rg'}",
+                                "title": rg_album,
+                                "albumArtist": "Various Artists" if rg_is_comp else rec_artist,
+                                "year": track.get("year") or "",
+                                "country": "XW",
+                                "format": "Digital Media",
+                                "trackCount": 1,
+                                "isCompilation": rg_is_comp,
+                                "isRemixAlbum": "remix" in rg_sec or "remix" in rg_album.lower(),
+                                "matchScore": round(score, 2),
+                                "tracklist": [
+                                    {
+                                        "position": 1,
+                                        "title": rec_title,
+                                        "durationSec": int(track.get("durationSec") or 0),
+                                    }
+                                ],
+                            }
                         candidates.append(
                             {
-                                "provider": "acoustid",
+                                "provider": "musicbrainz",
                                 "artist": rec_artist,
-                                "albumArtist": rec_artist,
-                                "title": rec0.get("title") or title,
-                                "album": album,
+                                "albumArtist": (
+                                    acoustid_fallback_release["albumArtist"]
+                                    if acoustid_fallback_release
+                                    else rec_artist
+                                ),
+                                "title": rec_title,
+                                "album": rg_album,
                                 "year": track.get("year") or "",
                                 "confidence": round(score, 2),
                                 "mbRecordingId": rec_id,
                                 "note": "Chromaprint Audio-Fingerprint via AcoustID",
                             }
                         )
+                    cache_put(
+                        "fingerprint",
+                        fp_cache_key,
+                        {
+                            "acoustidId": acoustid_id,
+                            "mbRecordingId": mb_recording_id,
+                            "score": score,
+                            "release": acoustid_fallback_release,
+                        },
+                    )
 
     # 5b. MusicBrainz Recording/Release Lookup (1 req/s Rate-Limiter)
     mb_data: Optional[Dict[str, Any]] = cached_mb
@@ -1201,7 +1248,7 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
         if mb_data is not None:
             cache_put("mb_release", cache_key, mb_data)
         else:
-            err_msg = "MusicBrainz nicht erreichbar (uebersprungen)."
+            err_msg = "MusicBrainz nicht erreichbar (übersprungen)."
 
     if mb_data and mb_data.get("recordings"):
         top = mb_data["recordings"][0]
@@ -1252,6 +1299,7 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
 
         if available_releases:
             matched_release = available_releases[0]
+            active_source = "musicbrainz"
 
         candidates.append(
             {
@@ -1267,72 +1315,205 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
             }
         )
 
-    # 5c. Optional Discogs Fallback (wenn DISCOGS_TOKEN konfiguriert und noch < threshold)
-    if DISCOGS_TOKEN and confidence < float(cfg.get("confidenceThreshold", CONFIDENCE_THRESHOLD)):
-        await discogs_limiter.acquire()
-        q = f"{artist} {title}".strip()
-        d_url = f"https://api.discogs.com/database/search?q={quote(q)}&type=release&per_page=3"
-        d_data = await asyncio.to_thread(
-            _http_get_json,
-            d_url,
-            {
-                "User-Agent": MB_USER_AGENT,
-                "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-            },
-        )
-        if d_data and d_data.get("results"):
-            r0 = d_data["results"][0]
-            d_title_full = r0.get("title") or ""
-            d_artist, d_album = (
-                d_title_full.split(" - ", 1) if " - " in d_title_full else (artist, d_title_full)
+    # 5c. Discogs Fallback (wenn DISCOGS_TOKEN konfiguriert und noch kein Release-Match oder Konfidenz < Schwellwert)
+    if DISCOGS_TOKEN and (matched_release is None or confidence < threshold) and (artist or title):
+        cached_discogs = None if force_refresh else cache_get("discogs", cache_key)
+        d_data = cached_discogs
+        if d_data is not None:
+            cache_hit = True
+        else:
+            await discogs_limiter.acquire()
+            q = f"{artist} {title}".strip()
+            d_url = f"https://api.discogs.com/database/search?q={quote(q)}&type=release&per_page=3"
+            d_data = await asyncio.to_thread(
+                _http_get_json,
+                d_url,
+                {
+                    "User-Agent": MB_USER_AGENT,
+                    "Authorization": f"Discogs token={DISCOGS_TOKEN}",
+                },
             )
+            if d_data is not None:
+                cache_put("discogs", cache_key, d_data)
+
+        if d_data and d_data.get("results"):
+            for r_idx, r_item in enumerate((d_data.get("results") or [])[:3]):
+                d_title_full = r_item.get("title") or ""
+                d_artist, d_album = (
+                    d_title_full.split(" - ", 1) if " - " in d_title_full else (artist, d_title_full)
+                )
+                d_artist = d_artist.strip() or artist
+                d_album = d_album.strip() or album
+                d_year = str(r_item.get("year") or track.get("year") or "")
+                d_formats = [str(f) for f in (r_item.get("format") or [])]
+                d_fmt_str = " · ".join(d_formats[:2]) if d_formats else "Digital Media"
+                d_is_comp = any("compilation" in f.lower() for f in d_formats) or d_artist.lower() == "various"
+                d_rel = {
+                    "releaseId": f"discogs-{r_item.get('id') or r_idx}",
+                    "title": d_album,
+                    "albumArtist": "Various Artists" if d_is_comp else d_artist,
+                    "year": d_year,
+                    "country": str(r_item.get("country") or "XW"),
+                    "format": d_fmt_str,
+                    "trackCount": 1,
+                    "isCompilation": d_is_comp,
+                    "isRemixAlbum": "remix" in d_album.lower(),
+                    "matchScore": 0.85,
+                    "tracklist": [
+                        {
+                            "position": 1,
+                            "title": title,
+                            "durationSec": int(track.get("durationSec") or 0),
+                        }
+                    ],
+                }
+                available_releases.append(d_rel)
+                if r_idx == 0:
+                    cov_img = str(r_item.get("cover_image") or "")
+                    if cov_img and "spacer.gif" not in cov_img and not fallback_cover_url:
+                        fallback_cover_url = cov_img
+                        fallback_cover_source = "Discogs"
+                    candidates.append(
+                        {
+                            "provider": "discogs",
+                            "artist": d_artist,
+                            "albumArtist": d_rel["albumArtist"],
+                            "title": title,
+                            "album": d_album,
+                            "year": d_year,
+                            "confidence": 0.85,
+                            "note": "Discogs Katalog-Treffer (Fallback)",
+                        }
+                    )
+            if matched_release is None and available_releases:
+                matched_release = available_releases[0]
+                active_source = "discogs"
+            confidence = max(confidence, 0.85)
+
+    # 5c-2. Deezer Public API Fallback (ohne API-Key, wenn MusicBrainz & Discogs keinen Treffer lieferten)
+    if (matched_release is None or confidence < threshold) and title and title != "Unbekannt":
+        cached_dz = None if force_refresh else cache_get("deezer", cache_key)
+        dz_data = cached_dz
+        if dz_data is not None:
+            cache_hit = True
+        else:
+            await deezer_limiter.acquire()
+            dz_q = (
+                f'artist:"{artist.replace(chr(34), "")}" track:"{title.replace(chr(34), "")}"'
+                if artist and "unbekannt" not in artist.lower()
+                else title
+            )
+            dz_url = f"https://api.deezer.com/search?q={quote(dz_q)}&limit=3"
+            dz_data = await asyncio.to_thread(
+                _http_get_json, dz_url, {"User-Agent": MB_USER_AGENT}
+            )
+            if dz_data is not None:
+                cache_put("deezer", cache_key, dz_data)
+
+        if dz_data and dz_data.get("data"):
+            dz0 = dz_data["data"][0]
+            dz_artist = (dz0.get("artist") or {}).get("name") or artist
+            dz_title = dz0.get("title") or title
+            dz_alb = dz0.get("album") or {}
+            dz_album = dz_alb.get("title") or album
+            dz_cov = dz_alb.get("cover_xl") or dz_alb.get("cover_big") or dz_alb.get("cover_medium")
+            if dz_cov and not fallback_cover_url:
+                fallback_cover_url = str(dz_cov)
+                fallback_cover_source = "Deezer"
+            dz_rel = {
+                "releaseId": f"deezer-{dz_alb.get('id') or dz0.get('id') or '0'}",
+                "title": dz_album,
+                "albumArtist": dz_artist,
+                "year": track.get("year") or "",
+                "country": "XW",
+                "format": "Digital Media (Deezer)",
+                "trackCount": 1,
+                "isCompilation": dz_artist.lower() in ("various artists", "various"),
+                "isRemixAlbum": "remix" in dz_album.lower(),
+                "matchScore": 0.86,
+                "tracklist": [
+                    {
+                        "position": 1,
+                        "title": dz_title,
+                        "durationSec": int(dz0.get("duration") or track.get("durationSec") or 0),
+                    }
+                ],
+            }
+            available_releases.append(dz_rel)
             candidates.append(
                 {
-                    "provider": "discogs",
-                    "artist": d_artist.strip() or artist,
-                    "albumArtist": d_artist.strip() or artist,
-                    "title": title,
-                    "album": d_album.strip() or album,
-                    "year": str(r0.get("year") or track.get("year") or ""),
-                    "confidence": 0.82,
-                    "note": "Discogs Katalog-Treffer",
+                    "provider": "deezer",
+                    "artist": dz_artist,
+                    "albumArtist": dz_artist,
+                    "title": dz_title,
+                    "album": dz_album,
+                    "year": track.get("year") or "",
+                    "confidence": 0.86,
+                    "note": "Deezer Katalog-Treffer (Fallback)",
                 }
             )
-            confidence = max(confidence, 0.82)
+            if matched_release is None:
+                matched_release = dz_rel
+                active_source = "deezer"
+            confidence = max(confidence, 0.86)
 
-    # 5d. Cover Art Archive Check
+    # 5c-3. AcoustID Release-Group Fallback, falls AcoustID Treffer hatte aber kein anderer Dienst
+    if matched_release is None and acoustid_fallback_release is not None:
+        available_releases.append(acoustid_fallback_release)
+        matched_release = acoustid_fallback_release
+        active_source = "musicbrainz"
+
+    # Wenn MusicBrainz kurz nicht erreichbar war, aber Discogs/Deezer/AcoustID sauber gerettet hat -> kein Fehler!
+    if err_msg and matched_release is not None and confidence >= threshold:
+        err_msg = None
+
+    # 5d. Cover Art Check (Cover Art Archive fuer MusicBrainz-UUIDs, sonst Discogs/Deezer-Cover)
     cover_patch = dict(track.get("cover") or {})
-    if cfg.get("embedCover", True) and matched_release and matched_release.get("releaseId"):
-        rel_id = matched_release["releaseId"]
-        cached_cov = cache_get("cover", rel_id)
-        if cached_cov is not None:
-            if cached_cov.get("url"):
-                cover_patch = {
-                    **cover_patch,
-                    "status": "fetched",
-                    "source": "Cover Art Archive",
-                    "resolution": f"<= {cfg.get('coverMaxSize', 1000)} px",
-                    "imageUrl": cached_cov["url"],
-                }
-        else:
-            caa_url = f"https://coverartarchive.org/release/{rel_id}/front-500"
-            try:
-                head_res = await asyncio.to_thread(
-                    _HTTP_SESSION.head, caa_url, allow_redirects=True, timeout=8
-                )
-                if head_res.status_code == 200:
-                    cache_put("cover", rel_id, {"url": head_res.url})
+    if cfg.get("embedCover", True):
+        rel_id = str(matched_release.get("releaseId") or "") if matched_release else ""
+        is_mb_uuid = bool(rel_id) and not rel_id.startswith(("discogs-", "deezer-", "acoustid-"))
+        if is_mb_uuid:
+            cached_cov = cache_get("cover", rel_id)
+            if cached_cov is not None:
+                if cached_cov.get("url"):
                     cover_patch = {
                         **cover_patch,
                         "status": "fetched",
                         "source": "Cover Art Archive",
                         "resolution": f"<= {cfg.get('coverMaxSize', 1000)} px",
-                        "imageUrl": head_res.url,
+                        "imageUrl": cached_cov["url"],
                     }
-                else:
-                    cache_put("cover", rel_id, {"url": None})
-            except Exception:
-                pass
+            else:
+                caa_url = f"https://coverartarchive.org/release/{rel_id}/front-500"
+                try:
+                    head_res = await asyncio.to_thread(
+                        _HTTP_SESSION.head, caa_url, allow_redirects=True, timeout=8
+                    )
+                    if head_res.status_code == 200:
+                        cache_put("cover", rel_id, {"url": head_res.url})
+                        cover_patch = {
+                            **cover_patch,
+                            "status": "fetched",
+                            "source": "Cover Art Archive",
+                            "resolution": f"<= {cfg.get('coverMaxSize', 1000)} px",
+                            "imageUrl": head_res.url,
+                        }
+                    else:
+                        cache_put("cover", rel_id, {"url": None})
+                except Exception:
+                    pass
+
+        if (
+            fallback_cover_url
+            and cover_patch.get("status") not in ("fetched", "existing")
+        ):
+            cover_patch = {
+                **cover_patch,
+                "status": "fetched",
+                "source": fallback_cover_source,
+                "resolution": f"<= {cfg.get('coverMaxSize', 1000)} px",
+                "imageUrl": fallback_cover_url,
+            }
 
     # 5e. LRCLIB Synced/Plain Lyrics Lookup
     lyrics_patch = dict(track.get("lyrics") or {})
@@ -1372,8 +1553,13 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
                     "plainText": lyr_data["plainLyrics"],
                 }
 
-    best_cand = candidates[0] if candidates else None
+    best_cand = (
+        max(candidates, key=lambda c: float(c.get("confidence") or 0.0))
+        if candidates
+        else None
+    )
     updated = dict(track)
+    updated["activeSource"] = active_source
     updated["sourceCandidates"] = candidates
     updated["availableReleases"] = available_releases
     updated["matchedRelease"] = matched_release
@@ -1385,8 +1571,9 @@ async def lookup_track_metadata(track: Dict[str, Any], cfg: Dict[str, Any]) -> T
     updated["cachedLookup"] = cache_hit
     updated["cover"] = cover_patch
     updated["lyrics"] = lyrics_patch
+    updated["lookupError"] = err_msg
     updated["status"] = "analyzed" if track.get("status") == "pending" else track.get("status", "analyzed")
-    if best_cand and confidence >= float(cfg.get("confidenceThreshold", CONFIDENCE_THRESHOLD)):
+    if best_cand and confidence >= threshold:
         updated["artist"] = best_cand["artist"] or updated["artist"]
         updated["albumArtist"] = best_cand["albumArtist"] or updated["albumArtist"]
         updated["title"] = best_cand["title"] or updated["title"]
@@ -1718,6 +1905,119 @@ async def _run_analyze_job(
         print(f"[TonArchiv] Fehler in Modus 1: {exc}", flush=True)
 
 
+async def _run_retry_failed_job(
+    track_ids: Optional[List[str]] = None,
+    include_unmatched: bool = False,
+    req_cfg: Optional[Dict[str, Any]] = None,
+) -> None:
+    global queue_state
+    cfg = {**build_server_config(), **(req_cfg or {})}
+    try:
+        state = await asyncio.to_thread(load_persisted_state)
+        if not state or not (state.get("tracks") or []):
+            queue_state = QueueStatus(
+                activeMode="retry_failed",
+                status="completed",
+                processedCount=0,
+                totalCount=0,
+                errorCount=0,
+                cacheHitCount=0,
+                etaSeconds=0,
+                currentTrackLabel="",
+                checkpointIndex=0,
+                errors=[],
+            )
+            return
+
+        tracks: List[Dict[str, Any]] = state.get("tracks") or []
+        explicit_set = set(track_ids) if track_ids else None
+        target_indices: List[int] = []
+        for idx, t in enumerate(tracks):
+            if not isinstance(t, dict):
+                continue
+            if explicit_set is not None:
+                if t.get("id") in explicit_set:
+                    target_indices.append(idx)
+            elif t.get("lookupError"):
+                target_indices.append(idx)
+            elif include_unmatched and not t.get("matchedRelease") and not t.get("mbRecordingId"):
+                target_indices.append(idx)
+
+        total_targets = len(target_indices)
+        queue_state = QueueStatus(
+            activeMode="retry_failed",
+            status="running" if total_targets > 0 else "completed",
+            processedCount=0,
+            totalCount=total_targets,
+            errorCount=0,
+            cacheHitCount=0,
+            etaSeconds=total_targets,
+            currentTrackLabel="",
+            checkpointIndex=0,
+            errors=[],
+        )
+
+        if total_targets == 0:
+            return
+
+        print(
+            f"[TonArchiv] Nachpruefung (MusicBrainz-Retry) gestartet fuer {total_targets} Tracks.",
+            flush=True,
+        )
+
+        for step_idx, track_idx in enumerate(target_indices):
+            await pause_event.wait()
+            track = tracks[track_idx]
+            queue_state.currentTrackLabel = f"{track.get('artist', '')} — {track.get('title', '')}"
+            queue_state.etaSeconds = max(1, total_targets - step_idx)
+
+            updated_track, hit, err_msg = await lookup_track_metadata(
+                track, cfg, force_refresh=True
+            )
+            tracks[track_idx] = updated_track
+            queue_state.processedCount = step_idx + 1
+            queue_state.checkpointIndex = step_idx + 1
+            if hit:
+                queue_state.cacheHitCount += 1
+            if err_msg:
+                queue_state.errorCount += 1
+                queue_state.errors.append(
+                    {
+                        "id": f"retry-err-{track_idx}",
+                        "stage": "MusicBrainz",
+                        "trackLabel": track.get("fileName", ""),
+                        "message": err_msg,
+                        "recovered": True,
+                    }
+                )
+                if len(queue_state.errors) > 25:
+                    queue_state.errors = queue_state.errors[-25:]
+
+            if (step_idx + 1) % 15 == 0 or step_idx + 1 == total_targets:
+                state["tracks"] = tracks
+                snapshot = {**state, "tracks": list(tracks)}
+                await asyncio.to_thread(save_persisted_state, snapshot)
+                print(
+                    f"[TonArchiv] Nachpruefung: {step_idx + 1}/{total_targets} Tracks (noch offen: {queue_state.errorCount})",
+                    flush=True,
+                )
+
+        state["tracks"] = tracks
+        snapshot = {**state, "tracks": list(tracks)}
+        await asyncio.to_thread(save_persisted_state, snapshot)
+        queue_state.status = "completed"
+        queue_state.etaSeconds = 0
+        queue_state.currentTrackLabel = ""
+        print(
+            f"[TonArchiv] Nachpruefung abgeschlossen ({total_targets} Tracks, verbleibende Fehler: {queue_state.errorCount}).",
+            flush=True,
+        )
+    except Exception as exc:
+        queue_state.status = "error"
+        queue_state.currentTrackLabel = f"Nachpruefung-Fehler: {exc}"
+        print(f"[TonArchiv] Fehler in Nachpruefung: {exc}", flush=True)
+
+
 async def _startup_background_pipeline() -> None:
     global queue_state
     try:
@@ -1921,6 +2221,12 @@ class ModeAnalyzeRequest(BaseModel):
     resumeFrom: int = 0
 
 
+class ModeRetryFailedRequest(BaseModel):
+    config: Optional[Dict[str, Any]] = None
+    trackIds: Optional[List[str]] = None
+    includeUnmatched: bool = False
+
+
 class ModeTagRequest(BaseModel):
     config: Optional[Dict[str, Any]] = None
     tracks: Optional[List[Dict[str, Any]]] = None
@@ -2060,6 +2366,22 @@ async def api_mode_analyze(req: ModeAnalyzeRequest) -> Dict[str, Any]:
     pause_event.set()
     active_task = asyncio.create_task(_run_analyze_job(req.resumeFrom, req.config))
     return {"started": True, "mode": "analyze"}
+
+
+@app.post("/api/mode/retry-failed")
+async def api_mode_retry_failed(req: ModeRetryFailedRequest) -> Dict[str, Any]:
+    global active_task
+    if active_task and not active_task.done():
+        return {
+            "started": False,
+            "reason": "Eine Hintergrund-Aufgabe laeuft bereits",
+            "queue": asdict(queue_state),
+        }
+    pause_event.set()
+    active_task = asyncio.create_task(
+        _run_retry_failed_job(req.trackIds, req.includeUnmatched, req.config)
+    )
+    return {"started": True, "mode": "retry_failed"}
 
 
 def _merge_persisted_lyrics(

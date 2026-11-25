@@ -445,6 +445,7 @@ export default function App() {
               ? {
                   ...t,
                   ...lookup.trackPatch,
+                  lookupError: lookup.recoverableError ?? null,
                   status: t.status === 'pending' ? 'analyzed' : t.status,
                 }
               : t
@@ -492,6 +493,127 @@ export default function App() {
       showToast('Modus 1 abgeschlossen — Analysebericht erstellt (Read-Only).');
     },
     [config.embedCover, config.fetchLyrics, showToast, tracks]
+  );
+
+  // Retry ONLY tracks where MusicBrainz lookup failed (or unmatched tracks on request)
+  const handleRetryFailedLookups = useCallback(
+    async (options?: { trackIds?: string[]; includeUnmatched?: boolean }) => {
+      if (queue.status === 'running' || queue.status === 'paused') {
+        showToast('Es läuft bereits eine Hintergrund-Aufgabe.');
+        return;
+      }
+
+      if (backendConnected) {
+        const res = await postBackendAction<{ started?: boolean; reason?: string }>(
+          backendUrl,
+          '/api/mode/retry-failed',
+          {
+            config,
+            trackIds: options?.trackIds ?? null,
+            includeUnmatched: Boolean(options?.includeUnmatched),
+          }
+        );
+        if (res && res.started === false) {
+          showToast(res.reason || 'Nachprüfung konnte nicht gestartet werden.');
+          return;
+        }
+        const q = await fetchBackendQueue(backendUrl);
+        if (q) setQueue(q);
+        showToast('MusicBrainz-Nachprüfung für fehlgeschlagene Tracks gestartet.');
+        return;
+      }
+
+      const explicitSet = options?.trackIds ? new Set(options.trackIds) : null;
+      const targets = tracks.filter((t) => {
+        if (explicitSet) return explicitSet.has(t.id);
+        if (t.lookupError) return true;
+        return Boolean(options?.includeUnmatched && !t.matchedRelease && !t.mbRecordingId);
+      });
+
+      if (targets.length === 0) {
+        showToast('Keine fehlgeschlagenen MusicBrainz-Abrufe offen.');
+        return;
+      }
+
+      abortRunRef.current = false;
+      pauseRef.current = false;
+      setQueue({
+        activeMode: 'retry_failed',
+        status: 'running',
+        processedCount: 0,
+        totalCount: targets.length,
+        errorCount: 0,
+        cacheHitCount: 0,
+        etaSeconds: targets.length,
+        currentTrackLabel: '',
+        checkpointIndex: 0,
+        errors: [],
+      });
+
+      for (let i = 0; i < targets.length; i += 1) {
+        if (abortRunRef.current) return;
+        while (pauseRef.current) {
+          if (abortRunRef.current) return;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        const track = targets[i];
+        setQueue((prev) => ({
+          ...prev,
+          currentTrackLabel: `${track.artist} — ${track.title}`,
+          etaSeconds: Math.max(1, targets.length - i),
+        }));
+
+        const lookup = await runLiveLookupForTrack(track, {
+          fetchCover: config.embedCover,
+          fetchLyrics: config.fetchLyrics,
+        });
+        if (abortRunRef.current) return;
+
+        setTracks((prev) =>
+          prev.map((t) =>
+            t.id === track.id
+              ? {
+                  ...t,
+                  ...lookup.trackPatch,
+                  lookupError: lookup.recoverableError ?? null,
+                  status: t.status === 'pending' ? 'analyzed' : t.status,
+                }
+              : t
+          )
+        );
+
+        setQueue((prev) => ({
+          ...prev,
+          processedCount: i + 1,
+          cacheHitCount: prev.cacheHitCount + (lookup.cacheHit ? 1 : 0),
+          errorCount: prev.errorCount + (lookup.recoverableError ? 1 : 0),
+          etaSeconds: Math.max(0, targets.length - (i + 1)),
+          checkpointIndex: i + 1,
+          errors: lookup.recoverableError
+            ? [
+                ...prev.errors.slice(-24),
+                {
+                  id: `retry-err-${track.id}-${i}`,
+                  stage: 'MusicBrainz',
+                  trackLabel: track.fileName,
+                  message: lookup.recoverableError,
+                  recovered: true,
+                },
+              ]
+            : prev.errors,
+        }));
+      }
+
+      setQueue((prev) => ({
+        ...prev,
+        status: 'completed',
+        processedCount: targets.length,
+        etaSeconds: 0,
+        currentTrackLabel: '',
+      }));
+      showToast(`MusicBrainz-Nachprüfung abgeschlossen (${targets.length} Tracks geprüft).`);
+    },
+    [backendConnected, backendUrl, config, queue.status, showToast, tracks]
   );
 
   const buildTagPayload = useCallback(
@@ -914,6 +1036,7 @@ export default function App() {
               onResumeQueue={handleResumeQueue}
               onResumeInterrupted={() => void handleResumeInterrupted()}
               onRollbackJournal={() => void handleRollbackJournal()}
+              onRetryFailedLookups={(opts) => void handleRetryFailedLookups(opts)}
             />
           )}
 
@@ -964,10 +1087,12 @@ export default function App() {
         track={selectedTrack}
         plan={selectedTrackPlan}
         config={config}
+        queueBusy={queue.status === 'running' || queue.status === 'paused'}
         onClose={() => setSelectedTrackId(null)}
         onSelectSource={handleSelectSource}
         onUpdateLyrics={handleUpdateLyrics}
         onApplyManualReviewAssignment={handleApplyManualReviewAssignment}
+        onRetryTrackLookup={(trackId) => void handleRetryFailedLookups({ trackIds: [trackId] })}
       />
 
       {/* Mandatory Backup Confirmation Modal before Mode 2 */}
