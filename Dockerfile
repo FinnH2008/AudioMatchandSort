@@ -36,7 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r /app/requirements.txt
+    && pip install --no-cache-dir -r /app/requirements.txt \
+    && (pip install --no-cache-dir "shazamio>=0.6.0" || echo "[TonArchiv] ShazamIO optional nicht verfuegbar — AcoustID/MusicBrainz bleiben aktiv")
 
 # Essentia ist optional: Scheitert der Wheel-Install (z. B. ARM64), laeuft TonArchiv ohne Key/BPM/Spektral-Check weiter
 RUN if [ "$INSTALL_ESSENTIA" = "true" ]; then \

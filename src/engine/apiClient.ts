@@ -18,6 +18,7 @@ export interface BackendHealthResponse {
   acoustid_configured: boolean;
   discogs_configured: boolean;
   shazamio_enabled: boolean;
+  shazamio_available?: boolean;
   wav_embed_media: boolean;
   auto_analyze_on_start?: boolean;
   journal_state: RollbackJournal['state'];

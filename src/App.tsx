@@ -238,6 +238,7 @@ export default function App() {
           acoustidKeyConfigured: health.acoustid_configured,
           discogsTokenConfigured: health.discogs_configured,
           enableShazamFallback: health.shazamio_enabled,
+          shazamioAvailable: health.shazamio_available ?? prev.shazamioAvailable,
           wavEmbedMedia: health.wav_embed_media,
         }));
 
@@ -698,6 +699,52 @@ export default function App() {
     [backendConnected, backendUrl, config, queue.status, showToast, tracks]
   );
 
+  const handleRetagWithAudioId = useCallback(
+    async (options: { scope: 'review' | 'all' | 'selected'; trackIds?: string[] }) => {
+      if (queue.status === 'running' || queue.status === 'paused') {
+        showToast('Es läuft bereits eine Hintergrund-Aufgabe.');
+        return;
+      }
+      if (!backendConnected) {
+        showToast('Audio-Fingerprint (Musik-ID) benötigt das laufende Docker-Backend.');
+        return;
+      }
+      const res = await postBackendAction<{
+        started?: boolean;
+        reason?: string;
+        acoustidActive?: boolean;
+        shazamioActive?: boolean;
+      }>(backendUrl, '/api/mode/retag-audio-id', {
+        config,
+        scope: options.scope,
+        trackIds: options.trackIds,
+        useAudioId: true,
+      });
+      if (res && res.started === false) {
+        showToast(res.reason || 'Musik-ID Nach-Taggen konnte nicht gestartet werden.');
+        return;
+      }
+      const q = await fetchBackendQueue(backendUrl);
+      if (q) setQueue(q);
+      const engines = [
+        res?.acoustidActive ? 'AcoustID' : null,
+        res?.shazamioActive ? 'ShazamIO' : null,
+      ]
+        .filter(Boolean)
+        .join(' + ');
+      const scopeLabel =
+        options.scope === 'selected'
+          ? 'Track per Musik-ID'
+          : options.scope === 'all'
+            ? 'Alle Tracks per Musik-ID'
+            : 'Review-Tracks per Musik-ID';
+      showToast(
+        `${scopeLabel} gestartet (${engines || 'Verifizierter MusicBrainz/Deezer-Abgleich'}). Danach geänderte Tracks einfach per Re-Run neu einsortieren.`
+      );
+    },
+    [backendConnected, backendUrl, config, queue.status, showToast]
+  );
+
   const buildTagPayload = useCallback(
     (subset?: AudioTrack[]) => {
       const sourceTracks = subset ?? tracks;
@@ -841,14 +888,25 @@ export default function App() {
         return;
       }
       const { moves } = buildMovePayload(pendingReRunTracks);
-      await postBackendAction(backendUrl, '/api/mode/rerun', {
-        config,
-        trackIds: pendingReRunTracks.map((t) => t.id),
-        tracks: buildTagPayload(pendingReRunTracks),
-        moves,
-      });
-      await checkAndLoadBackend(backendUrl, true);
-      showToast('Gezielter Re-Run (Modus 2 + Modus 3) abgeschlossen.');
+      const res = await postBackendAction<{ started?: boolean; reason?: string }>(
+        backendUrl,
+        '/api/mode/rerun',
+        {
+          config,
+          trackIds: pendingReRunTracks.map((t) => t.id),
+          tracks: buildTagPayload(pendingReRunTracks),
+          moves,
+        }
+      );
+      if (res && res.started === false) {
+        showToast(res.reason || 'Gezielter Re-Run konnte nicht gestartet werden.');
+        return;
+      }
+      const q = await fetchBackendQueue(backendUrl);
+      if (q) setQueue(q);
+      showToast(
+        `Gezielter Re-Run (Taggen & Neu-Sortieren) für ${pendingReRunTracks.length} Tracks gestartet.`
+      );
     }
   };
 
@@ -889,14 +947,25 @@ export default function App() {
       showToast('Modus 2 (Taggen & Cover) im Docker-Container gestartet.');
     } else if (modeToLaunch === 'rerun') {
       const { moves } = buildMovePayload(pendingReRunTracks);
-      await postBackendAction(backendUrl, '/api/mode/rerun', {
-        config,
-        trackIds: pendingReRunTracks.map((t) => t.id),
-        tracks: buildTagPayload(pendingReRunTracks),
-        moves,
-      });
-      await checkAndLoadBackend(backendUrl, true);
-      showToast('Gezielter Re-Run (Modus 2 + Modus 3) abgeschlossen.');
+      const res = await postBackendAction<{ started?: boolean; reason?: string }>(
+        backendUrl,
+        '/api/mode/rerun',
+        {
+          config,
+          trackIds: pendingReRunTracks.map((t) => t.id),
+          tracks: buildTagPayload(pendingReRunTracks),
+          moves,
+        }
+      );
+      if (res && res.started === false) {
+        showToast(res.reason || 'Gezielter Re-Run konnte nicht gestartet werden.');
+        return;
+      }
+      const q = await fetchBackendQueue(backendUrl);
+      if (q) setQueue(q);
+      showToast(
+        `Gezielter Re-Run (Taggen & Neu-Sortieren) für ${pendingReRunTracks.length} Tracks gestartet.`
+      );
     }
   };
 
@@ -1137,17 +1206,22 @@ export default function App() {
       removedFilesCount?: number;
       keptCount?: number;
       keptSample?: string[];
+      keptReasons?: string[];
     }>(backendUrl, '/api/cleanup-empty');
     const dirCount = res?.removedCount ?? 0;
     const fileCount = res?.removedFilesCount ?? 0;
     const keptCount = res?.keptCount ?? 0;
+    const reasonHint =
+      res?.keptReasons && res.keptReasons.length > 0
+        ? ` Behalten: ${res.keptReasons.slice(0, 4).join(', ')}${keptCount > 4 ? ' …' : ''}`
+        : '';
     if (dirCount > 0) {
       showToast(
-        `${dirCount} Alt-Ordner aufgeräumt (${fileCount} verwaiste .nfo/.lrc/.jpg-Reste entfernt${keptCount > 0 ? ` · ${keptCount} Ordner mit echten Dateien behalten` : ''}).`
+        `${dirCount} Alt-Ordner aufgeräumt (${fileCount} verwaiste .nfo/.lrc/.jpg-Reste entfernt).${reasonHint}`
       );
     } else if (keptCount > 0) {
       showToast(
-        `Keine leeren Alt-Ordner mehr vorhanden (${keptCount} Ordner enthalten noch echte Audio-/Videodateien).`
+        `Keine leeren Alt-Ordner mehr vorhanden (${keptCount} geschützt).${reasonHint}`
       );
     } else {
       showToast('Alle Alt-Ordner sind bereits vollständig aufgeräumt.');
@@ -1239,6 +1313,8 @@ export default function App() {
               onResumeInterrupted={() => void handleResumeInterrupted()}
               onRollbackJournal={() => void handleRollbackJournal()}
               onRetryFailedLookups={(opts) => void handleRetryFailedLookups(opts)}
+              onRetagWithAudioId={(opts) => void handleRetagWithAudioId(opts)}
+              onTriggerPendingReRun={() => void handleTriggerPrimaryAction()}
               onRescanBackend={() => void handleRescanBackend()}
               onCleanupEmptyDirs={() => void handleCleanupEmptyDirs()}
             />
@@ -1299,6 +1375,11 @@ export default function App() {
         onUpdateLyrics={handleUpdateLyrics}
         onApplyManualReviewAssignment={handleApplyManualReviewAssignment}
         onRetryTrackLookup={(trackId) => void handleRetryFailedLookups({ trackIds: [trackId] })}
+        onRetagTrackWithAudioId={
+          backendConnected
+            ? (trackId) => void handleRetagWithAudioId({ scope: 'selected', trackIds: [trackId] })
+            : undefined
+        }
       />
 
       {/* Mandatory Backup Confirmation Modal before Mode 2 */}

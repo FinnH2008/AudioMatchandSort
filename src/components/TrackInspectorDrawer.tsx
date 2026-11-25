@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Disc, FileAudio, Music2, RefreshCw, X } from 'lucide-react';
+import { AlertTriangle, AudioWaveform, Check, Disc, FileAudio, Music2, RefreshCw, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { formatCodecLabel } from '../engine/codecAndSanitizer';
 import {
@@ -34,6 +34,7 @@ interface TrackInspectorDrawerProps {
     }
   ) => void;
   onRetryTrackLookup?: (trackId: string) => void;
+  onRetagTrackWithAudioId?: (trackId: string) => void;
 }
 
 type DrawerTab = 'overview' | 'metadata' | 'lyrics';
@@ -48,9 +49,11 @@ export function TrackInspectorDrawer({
   onUpdateLyrics,
   onApplyManualReviewAssignment,
   onRetryTrackLookup,
+  onRetagTrackWithAudioId,
 }: TrackInspectorDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>('overview');
   const [imgError, setImgError] = useState(false);
+  const [showManualEditor, setShowManualEditor] = useState(false);
 
   // Manual assignment editor state for review tracks
   const [chosenAssignment, setChosenAssignment] = useState<ManualAssignment>('album_track');
@@ -80,6 +83,7 @@ export function TrackInspectorDrawer({
     setEditTrackNo(track.trackNumber || '');
     setLyricsDraft(track.lyrics?.syncedLrc || track.lyrics?.plainText || '');
     setLyricsSavedToast(false);
+    setShowManualEditor(false);
   }, [track?.id]);
 
   useEffect(() => {
@@ -302,6 +306,31 @@ export function TrackInspectorDrawer({
         <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-6 text-sm">
           {activeTab === 'overview' && (
             <>
+              {/* Single-Track Audio-ID (Waveform Fingerprint) Re-Identification */}
+              {onRetagTrackWithAudioId && (
+                <div className="bg-[#0F172A] border border-sky-400/40 rounded-md p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 text-xs font-semibold text-sky-300">
+                      <AudioWaveform className="h-4 w-4 shrink-0" />
+                      <span>Falscher Tag? Direkt über Audiosignal (Musik-ID) erkennen</span>
+                    </div>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      Ignoriert bestehende Tags und identifiziert diesen Song per Audio-Fingerprint
+                      (ShazamIO / AcoustID + MusicBrainz).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={queueBusy}
+                    onClick={() => onRetagTrackWithAudioId(track.id)}
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 min-h-[40px] rounded-md bg-sky-400 text-slate-950 text-xs font-semibold hover:bg-sky-300 disabled:opacity-50 whitespace-nowrap shrink-0"
+                  >
+                    <AudioWaveform className="h-3.5 w-3.5" />
+                    <span>Per Musik-ID neu erkennen</span>
+                  </button>
+                </div>
+              )}
+
               {/* MusicBrainz Lookup Error Notice + Targeted Single-Track Retry */}
               {track.lookupError && (
                 <div className="bg-[#0F172A] border border-amber-500/50 rounded-md p-4 space-y-2.5">
@@ -408,8 +437,19 @@ export function TrackInspectorDrawer({
                 )}
               </div>
 
-              {/* Manual Review Assignment & Re-Run (Mode 2 + Mode 3) */}
-              {isReviewTrack && (
+              {/* Manual Review Assignment & Re-Run (Mode 2 + Mode 3) — also toggleable for any track */}
+              {!isReviewTrack && !showManualEditor && (
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setShowManualEditor(true)}
+                    className="px-3 py-1.5 rounded-md border border-[#243044] bg-[#0F172A] text-xs text-slate-300 hover:border-sky-400 hover:text-sky-200"
+                  >
+                    Tags manuell korrigieren &amp; neu sortieren …
+                  </button>
+                </div>
+              )}
+              {(isReviewTrack || showManualEditor) && (
                 <div className="bg-[#0F172A] border border-sky-400/40 rounded-md p-4 space-y-4">
                   <div className="space-y-1">
                     <h3 className="text-sm font-semibold text-slate-100">

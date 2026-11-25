@@ -933,5 +933,76 @@ test('Companion files follow _Review / DJ-Remixes target directories and _Review
   );
 });
 
+test('Confidently matched sibling tracks with per-track backend releases stay album_track and exit _Review cleanly', () => {
+  const rel1: AlbumReleaseCandidate = {
+    releaseId: 'mb-britney-1',
+    title: 'Oops!... I Did It Again',
+    albumArtist: 'Britney Spears',
+    year: '2000',
+    country: 'XW',
+    format: 'Digital Media',
+    trackCount: 12,
+    isCompilation: false,
+    isRemixAlbum: false,
+    matchScore: 0.94,
+    tracklist: [{ position: 1, title: 'Oops!... I Did It Again', durationSec: 211 }],
+  };
+  const rel2: AlbumReleaseCandidate = {
+    ...rel1,
+    releaseId: 'mb-britney-2',
+    tracklist: [{ position: 2, title: 'Stronger', durationSec: 203 }],
+  };
+
+  const t1 = makeTrack({
+    id: 'brit-1',
+    artist: 'Britney Spears',
+    albumArtist: 'Britney Spears',
+    title: 'Oops!... I Did It Again',
+    album: 'Oops!... I Did It Again',
+    year: '2000',
+    trackNumber: '01',
+    durationSec: 211,
+    sourceDir: '_Review/Lossless/Britney Spears/Oops',
+    sourceRelativePath: '_Review/Lossless/Britney Spears/Oops/01.flac',
+    matchedRelease: rel1,
+    availableReleases: [rel1],
+    inMatchedReleaseTracklist: true,
+    acoustidConfidence: 0.94,
+    mbRecordingId: 'mb-rec-brit-1',
+  });
+  const t2 = makeTrack({
+    id: 'brit-2',
+    artist: 'Britney Spears',
+    albumArtist: 'Britney Spears',
+    title: 'Stronger',
+    album: 'Oops!... I Did It Again',
+    year: '2000',
+    trackNumber: '02',
+    durationSec: 203,
+    sourceDir: '_Review/Lossless/Britney Spears/Oops',
+    sourceRelativePath: '_Review/Lossless/Britney Spears/Oops/02.flac',
+    matchedRelease: rel2,
+    availableReleases: [rel2],
+    inMatchedReleaseTracklist: true,
+    acoustidConfidence: 0.92,
+    mbRecordingId: 'mb-rec-brit-2',
+  });
+
+  const plan = evaluateLibraryPlan(
+    [t1, t2],
+    [],
+    [],
+    DEFAULT_CONFIG,
+    { decisions: {}, renamedCanonical: {} },
+    { decisions: {}, selectedOriginals: {} }
+  );
+
+  assert.equal(plan.trackPlans.get('brit-1')?.classification, 'album_track');
+  assert.equal(plan.trackPlans.get('brit-2')?.classification, 'album_track');
+  assert.ok(
+    plan.trackPlans.get('brit-2')?.targetRelativePath.startsWith('Lossless/Britney Spears/2000 - ')
+  );
+});
+
 
 

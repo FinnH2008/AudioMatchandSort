@@ -317,9 +317,10 @@ export function classifyAllTracks(
       const keywordInTitle = hasRemixKeyword(track.title || track.originalTags?.title);
       const lowConfidence = (track.acoustidConfidence ?? 0) < config.confidenceThreshold;
       const missingMb = !track.mbRecordingId;
+      const effectiveRelease = track.matchedRelease ?? dominantRelease;
 
-      // Without a confident release match, never auto-sort the album: all tracks get review
-      if (!dominantRelease) {
+      // Without any confident release match, never auto-sort the album: all tracks get review
+      if (!effectiveRelease) {
         result.set(track.id, {
           classification: 'review_no_release_match',
           inTracklist: false,
@@ -329,10 +330,19 @@ export function classifyAllTracks(
         continue;
       }
 
-      const tracklistCheck = isTrackInReleaseTracklist(track, dominantRelease);
+      const dominantCheck = dominantRelease
+        ? isTrackInReleaseTracklist(track, dominantRelease)
+        : { matched: false, position: null };
+      const ownReleaseCheck = track.matchedRelease
+        ? isTrackInReleaseTracklist(track, track.matchedRelease)
+        : { matched: false, position: null };
+      const tracklistMatched =
+        dominantCheck.matched ||
+        (ownReleaseCheck.matched && !lowConfidence) ||
+        (Boolean(track.matchedRelease) && Boolean(track.inMatchedReleaseTracklist) && !lowConfidence);
 
       // Official track on matched release (including official remixes & whole remix albums)
-      if (tracklistCheck.matched || (wholeRemixAlbum && !lowConfidence && !missingMb)) {
+      if (tracklistMatched || (wholeRemixAlbum && !lowConfidence && !missingMb)) {
         result.set(track.id, {
           classification: 'album_track',
           inTracklist: true,
@@ -347,7 +357,7 @@ export function classifyAllTracks(
         result.set(track.id, {
           classification: 'dj_remix',
           inTracklist: false,
-          detachReason: `Nicht in Trackliste von Release "${dominantRelease.title}" (${dominantRelease.trackCount} Tracks).`,
+          detachReason: `Nicht in Trackliste von Release "${effectiveRelease.title}" (${effectiveRelease.trackCount} Tracks).`,
           isRemixAlbumTrack: false,
         });
         continue;
@@ -365,7 +375,7 @@ export function classifyAllTracks(
 
       result.set(track.id, {
         classification: 'album_track',
-        inTracklist: tracklistCheck.matched,
+        inTracklist: tracklistMatched,
         detachReason: null,
         isRemixAlbumTrack: wholeRemixAlbum,
       });

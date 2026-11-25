@@ -273,6 +273,7 @@ export interface PipelineConfig {
   // Confidence & Sources
   confidenceThreshold: number;
   enableShazamFallback: boolean;
+  shazamioAvailable?: boolean;
   enableEssentia: boolean;
   essentiaAvailable: boolean;
   acoustidKeyConfigured: boolean;
@@ -333,7 +334,7 @@ export interface QueueErrorItem {
 }
 
 export interface BackgroundQueueState {
-  activeMode: WorkflowModeId | 'rerun' | 'retry_failed' | null;
+  activeMode: WorkflowModeId | 'rerun' | 'retry_failed' | 'retag_audio_id' | null;
   status: 'idle' | 'running' | 'paused' | 'completed' | 'error';
   processedCount: number;
   totalCount: number;
@@ -414,6 +415,7 @@ export const DEFAULT_CONFIG: PipelineConfig = {
 
   confidenceThreshold: 0.8,
   enableShazamFallback: true,
+  shazamioAvailable: false,
   enableEssentia: true,
   essentiaAvailable: false,
   acoustidKeyConfigured: false,

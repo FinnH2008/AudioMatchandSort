@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  AudioWaveform,
   CheckCircle2,
   ChevronRight,
   Film,
@@ -77,6 +78,8 @@ interface LibraryViewProps {
   onResumeInterrupted: () => void;
   onRollbackJournal: () => void;
   onRetryFailedLookups: (options?: { trackIds?: string[]; includeUnmatched?: boolean }) => void;
+  onRetagWithAudioId: (options: { scope: 'review' | 'all' | 'selected'; trackIds?: string[] }) => void;
+  onTriggerPendingReRun: () => void;
   onRescanBackend: () => void;
   onCleanupEmptyDirs: () => void;
 }
@@ -125,6 +128,8 @@ export function LibraryView({
   onResumeInterrupted,
   onRollbackJournal,
   onRetryFailedLookups,
+  onRetagWithAudioId,
+  onTriggerPendingReRun,
   onRescanBackend,
   onCleanupEmptyDirs,
 }: LibraryViewProps) {
@@ -458,35 +463,83 @@ export function LibraryView({
             </div>
           )}
 
-        {mode3Completed &&
+        {(mode3Completed || pendingReRunTracks.length > 0) &&
           backendConnected &&
           queue.status !== 'running' &&
           queue.status !== 'paused' && (
-            <div className="mt-4 pt-3.5 border-t border-[#243044] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-              <div className="flex items-center gap-2 text-emerald-300">
-                <CheckCircle2 className="h-4 w-4 shrink-0" />
-                <span>
-                  Sortierung abgeschlossen — verbleibende leere Alt-Ordner (z. B. mit verwaistem
-                  cover.jpg) kannst du hier direkt entfernen.
-                </span>
+            <div className="mt-4 pt-3.5 border-t border-[#243044] space-y-3 text-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-emerald-300">
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  <span>
+                    {pendingReRunTracks.length > 0
+                      ? `${pendingReRunTracks.length} Tracks per Musik-ID / manuell korrigiert — jetzt neu taggen & einsortieren.`
+                      : 'Sortierung abgeschlossen — verbleibende Alt-Ordner aufräumen oder Dateien nachträglich per Musik-ID (Audio-Fingerprint) exakt nach-taggen.'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {pendingReRunTracks.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={onTriggerPendingReRun}
+                      className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md bg-emerald-400 text-slate-950 font-semibold hover:bg-emerald-300 whitespace-nowrap"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      <span>Geänderte schreiben &amp; sortieren ({pendingReRunTracks.length})</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onCleanupEmptyDirs}
+                    className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300 whitespace-nowrap"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Leere Alt-Ordner aufräumen</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onRescanBackend}
+                    className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 font-medium hover:border-sky-400 whitespace-nowrap"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <span>Ordner neu scannen</span>
+                  </button>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={onCleanupEmptyDirs}
-                  className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300 whitespace-nowrap"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  <span>Leere Alt-Ordner aufräumen</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={onRescanBackend}
-                  className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 font-medium hover:border-sky-400 whitespace-nowrap"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  <span>Ordner neu scannen</span>
-                </button>
+
+              {/* Post-Hoc Musik-ID (Audio-Fingerprint) Nach-Tagging Bar */}
+              <div className="pt-3 border-t border-[#243044]/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 text-slate-300">
+                  <AudioWaveform className="h-4 w-4 text-sky-400 shrink-0" />
+                  <span>
+                    <strong className="text-slate-100">Nach-Taggen mit echter Musik-ID:</strong>{' '}
+                    Erkennt Songs direkt am Audiosignal (ignoriert falsche Tags ·{' '}
+                    {config.shazamioAvailable ? 'ShazamIO aktiv' : 'ShazamIO optional'}
+                    {config.acoustidKeyConfigured ? ' + AcoustID aktiv' : ''}).
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {report.reviewLosslessCount + report.reviewLossyCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => onRetagWithAudioId({ scope: 'review' })}
+                      className="flex-1 sm:flex-none min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md border border-sky-400/50 bg-sky-400/10 text-sky-200 font-medium hover:bg-sky-400/20 whitespace-nowrap"
+                    >
+                      <AudioWaveform className="h-3.5 w-3.5" />
+                      <span>
+                        _Review mit Musik-ID ({report.reviewLosslessCount + report.reviewLossyCount})
+                      </span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onRetagWithAudioId({ scope: 'all' })}
+                    className="flex-1 sm:flex-none min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 font-medium hover:border-sky-400 whitespace-nowrap"
+                  >
+                    <AudioWaveform className="h-3.5 w-3.5" />
+                    <span>Alle per Musik-ID prüfen ({tracks.length})</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -507,11 +560,13 @@ export function LibraryView({
                     ? 'Modus 1 (Analyse)'
                     : queue.activeMode === 'retry_failed'
                       ? 'Nachprüfung (MusicBrainz-Retry)'
-                      : queue.activeMode === 'tag'
-                        ? 'Modus 2 (Taggen)'
-                        : queue.activeMode === 'move'
-                          ? 'Modus 3 (Verschieben & Aufräumen)'
-                          : 'Gezielter Re-Run (Modus 2 + Modus 3)'}
+                      : queue.activeMode === 'retag_audio_id'
+                        ? 'Nach-Taggen mit Musik-ID (Audio-Fingerprint)'
+                        : queue.activeMode === 'tag'
+                          ? 'Modus 2 (Taggen)'
+                          : queue.activeMode === 'move'
+                            ? 'Modus 3 (Verschieben & Aufräumen)'
+                            : 'Gezielter Re-Run (Taggen & Sortieren)'}
                 </span>
                 <span className="text-slate-600">·</span>
                 <span
@@ -970,6 +1025,19 @@ export function LibraryView({
                 )}
               {backendConnected ? (
                 <>
+                  {report.reviewLosslessCount + report.reviewLossyCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => onRetagWithAudioId({ scope: 'review' })}
+                      disabled={queue.status === 'running' || queue.status === 'paused'}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-sky-400/50 bg-sky-400/10 text-sky-200 hover:bg-sky-400/20 disabled:opacity-50 whitespace-nowrap"
+                    >
+                      <AudioWaveform className="h-3.5 w-3.5" />
+                      <span>
+                        Review per Musik-ID ({report.reviewLosslessCount + report.reviewLossyCount})
+                      </span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={onCleanupEmptyDirs}
