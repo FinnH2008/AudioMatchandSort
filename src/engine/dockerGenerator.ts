@@ -160,11 +160,11 @@ COPY --from=frontend-builder /ui/dist /app/static
 
 EXPOSE 7070
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \\
   CMD curl -fsS http://127.0.0.1:7070/api/health || exit 1
 
 # Startet als konfigurierte PUID/PGID, damit NAS-Dateirechte (SMB/Unraid/Synology) erhalten bleiben
-ENTRYPOINT ["/bin/sh", "-c", "mkdir -p \\"\${CONFIG_DIR:-${config.configDir}}\\" && chown -R \\"\${PUID:-${config.puid}}:\${PGID:-${config.pgid}}\\" \\"\${CONFIG_DIR:-${config.configDir}}\\" && exec gosu \\"\${PUID:-${config.puid}}:\${PGID:-${config.pgid}}\\" uvicorn app:app --host 0.0.0.0 --port 7070"]
+ENTRYPOINT ["/bin/sh", "-c", "mkdir -p \\"\${CONFIG_DIR:-${config.configDir}}\\" && (chown -R \\"\${PUID:-${config.puid}}:\${PGID:-${config.pgid}}\\" \\"\${CONFIG_DIR:-${config.configDir}}\\" || true) && exec gosu \\"\${PUID:-${config.puid}}:\${PGID:-${config.pgid}}\\" uvicorn app:app --host 0.0.0.0 --port 7070"]
 `;
 
   const requirementsTxt = `fastapi>=0.115.0

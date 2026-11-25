@@ -1249,10 +1249,30 @@ def ensure_state_loaded(force_rescan: bool = False) -> Dict[str, Any]:
     return state
 
 
-async def _run_analyze_job(start_index: int = 0, cfg_override: Optional[Dict[str, Any]] = None) -> None:
+async def _run_analyze_job(
+    start_index: int = 0,
+    cfg_override: Optional[Dict[str, Any]] = None,
+    preloaded_state: Optional[Dict[str, Any]] = None,
+) -> None:
     global queue_state
     cfg = {**build_server_config(), **(cfg_override or {})}
-    state = ensure_state_loaded(force_rescan=(start_index == 0))
+    if preloaded_state is not None:
+        state = preloaded_state
+    else:
+        queue_state = QueueStatus(
+            activeMode="analyze",
+            status="running",
+            processedCount=start_index,
+            totalCount=0,
+            errorCount=0,
+            cacheHitCount=0,
+            etaSeconds=0,
+            currentTrackLabel=f"Scanne Musikordner ({MUSIC_DIR}) …",
+            checkpointIndex=start_index,
+            errors=[],
+        )
+        state = await asyncio.to_thread(ensure_state_loaded, start_index == 0)
+
     tracks: List[Dict[str, Any]] = state.get("tracks") or []
 
     queue_state = QueueStatus(
@@ -1304,6 +1324,35 @@ async def _run_analyze_job(start_index: int = 0, cfg_override: Optional[Dict[str
     queue_state.status = "completed"
     queue_state.etaSeconds = 0
     queue_state.currentTrackLabel = ""
+
+
+async def _startup_background_pipeline() -> None:
+    global queue_state
+    try:
+        persisted = load_persisted_state()
+        if persisted is None:
+            queue_state = QueueStatus(
+                activeMode="analyze",
+                status="running",
+                currentTrackLabel=f"Scanne Musikordner ({MUSIC_DIR}) …",
+            )
+            state = await asyncio.to_thread(ensure_state_loaded, False)
+        else:
+            state = persisted
+
+        if (
+            AUTO_ANALYZE_ON_START
+            and MUSIC_DIR.exists()
+            and len(state.get("tracks") or []) > 0
+            and not state.get("mode1Completed")
+        ):
+            await _run_analyze_job(0, preloaded_state=state)
+        elif queue_state.status == "running":
+            queue_state.status = "idle"
+            queue_state.currentTrackLabel = ""
+    except Exception as exc:
+        queue_state.status = "error"
+        queue_state.currentTrackLabel = f"Startup-Scan fehlgeschlagen: {exc}"
 
 
 def _execute_tag_entries(
@@ -1485,14 +1534,8 @@ class ModeRerunRequest(BaseModel):
 async def on_startup() -> None:
     global active_task
     init_cache_db()
-    state = ensure_state_loaded(force_rescan=False)
-    if (
-        AUTO_ANALYZE_ON_START
-        and MUSIC_DIR.exists()
-        and len(state.get("tracks") or []) > 0
-        and not state.get("mode1Completed")
-    ):
-        active_task = asyncio.create_task(_run_analyze_job(0))
+    # Scannen und Auto-Analyse asynchron im Hintergrund starten, damit Port 7070 sofort bereit ist
+    active_task = asyncio.create_task(_startup_background_pipeline())
 
 
 @app.get("/api/health")
@@ -1535,8 +1578,8 @@ def api_queue_resume() -> Dict[str, Any]:
 
 
 @app.post("/api/rescan")
-def api_rescan() -> Dict[str, Any]:
-    state = ensure_state_loaded(force_rescan=True)
+async def api_rescan() -> Dict[str, Any]:
+    state = await asyncio.to_thread(ensure_state_loaded, True)
     return {"rescanned": True, "trackCount": len(state.get("tracks") or [])}
 
 
@@ -1558,7 +1601,14 @@ def api_get_journal() -> Dict[str, Any]:
 @app.get("/api/state")
 def api_get_state() -> Dict[str, Any]:
     journal = load_journal()
-    state = ensure_state_loaded(force_rescan=False)
+    state = load_persisted_state() or {
+        "tracks": [],
+        "companions": [],
+        "leftovers": [],
+        "mode1Completed": False,
+        "mode2Completed": False,
+        "mode3Completed": False,
+    }
     return {
         "tracks": state.get("tracks") or [],
         "companions": state.get("companions") or [],
