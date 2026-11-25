@@ -1131,16 +1131,27 @@ export default function App() {
 
   const handleCleanupEmptyDirs = async () => {
     if (!backendConnected) return;
-    const res = await postBackendAction<{ cleaned?: boolean; removedCount?: number }>(
-      backendUrl,
-      '/api/cleanup-empty'
-    );
-    const count = res?.removedCount ?? 0;
-    showToast(
-      count > 0
-        ? `${count} leere Alt-Ordner / verwaiste Cover-Ordner entfernt.`
-        : 'Keine leeren Alt-Ordner gefunden (Ordner enthalten noch echte Dateien).'
-    );
+    const res = await postBackendAction<{
+      cleaned?: boolean;
+      removedCount?: number;
+      removedFilesCount?: number;
+      keptCount?: number;
+      keptSample?: string[];
+    }>(backendUrl, '/api/cleanup-empty');
+    const dirCount = res?.removedCount ?? 0;
+    const fileCount = res?.removedFilesCount ?? 0;
+    const keptCount = res?.keptCount ?? 0;
+    if (dirCount > 0) {
+      showToast(
+        `${dirCount} Alt-Ordner aufgeräumt (${fileCount} verwaiste .nfo/.lrc/.jpg-Reste entfernt${keptCount > 0 ? ` · ${keptCount} Ordner mit echten Dateien behalten` : ''}).`
+      );
+    } else if (keptCount > 0) {
+      showToast(
+        `Keine leeren Alt-Ordner mehr vorhanden (${keptCount} Ordner enthalten noch echte Audio-/Videodateien).`
+      );
+    } else {
+      showToast('Alle Alt-Ordner sind bereits vollständig aufgeräumt.');
+    }
   };
 
   const handleRescanBackend = async () => {

@@ -217,7 +217,20 @@ AUDIO_EXTS = {
     ".alac",
 }
 VIDEO_EXTS = {".mkv", ".avi", ".mov", ".webm", ".wmv", ".m4v", ".ts", ".mpeg", ".mpg"}
-COMPANION_EXTS = {".jpg", ".jpeg", ".png", ".cue", ".log", ".m3u", ".m3u8", ".pdf"}
+COMPANION_EXTS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".cue",
+    ".log",
+    ".m3u",
+    ".m3u8",
+    ".pdf",
+    ".nfo",
+    ".lrc",
+    ".txt",
+}
 
 app = FastAPI(title="TonArchiv", version="1.2.0")
 
@@ -1797,42 +1810,88 @@ def remove_truly_empty_dirs(dirs_to_check: List[Path]) -> List[str]:
     return removed
 
 
-def cleanup_residual_source_dirs() -> List[str]:
+_ORPHAN_CLEANUP_EXTS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".nfo",
+    ".lrc",
+    ".txt",
+    ".log",
+    ".cue",
+    ".m3u",
+    ".m3u8",
+    ".sfv",
+    ".md5",
+    ".ffp",
+}
+
+
+def cleanup_residual_source_dirs() -> Tuple[List[str], int, List[str]]:
     """Entfernt Alt-Ordner ausserhalb der Zielwurzeln (Lossless/Lossy/_Review/_Duplikate/DJ-Remixes),
-    wenn darin keine Audio-, Video- oder sonstigen Benutzerdateien mehr liegen (nur OS-Junk oder verwaistes cover.jpg)."""
+    wenn darin KEINE Audio-, Video- oder sonstigen Benutzerdateien mehr liegen —
+    sondern nur noch leere Unterordner, OS-Muell oder verwaiste Begleitdateien
+    (z. B. album.nfo, artist.nfo, folder.jpg, cover.jpg, *.lrc, *.log, *.cue)."""
     if not _path_exists_safe(MUSIC_DIR):
-        return []
-    removed: List[str] = []
+        return [], 0, []
+    removed_dirs: List[str] = []
+    removed_files = 0
+    kept_dirs: List[str] = []
     try:
         top_children = sorted(MUSIC_DIR.iterdir(), key=lambda p: p.name.lower())
     except OSError:
-        return []
+        return [], 0, []
 
     for top in top_children:
         if not top.is_dir() or top.name.lower() in _TARGET_ROOT_DIRS:
             continue
         # Bottom-up walk inside this legacy source folder
-        for root_str, dirnames, filenames in os.walk(str(top), topdown=False):
+        for root_str, _dirnames, _filenames in os.walk(str(top), topdown=False):
             cur = Path(root_str)
             _clean_os_junk_in_dir(cur)
             try:
                 remaining = list(cur.iterdir())
             except OSError:
                 continue
-            # Verwaistes cover.jpg nur dann entfernen, wenn keine anderen Dateien/Unterordner mehr da sind
-            if len(remaining) == 1 and remaining[0].is_file() and remaining[0].name.lower() == "cover.jpg":
+
+            # Wenn noch Unterordner existieren, ist darunter noch eine geschuetzte Datei -> behalten
+            if any(c.is_dir() for c in remaining):
+                continue
+
+            # Pruefen, ob ALLE verbleibenden Dateien ausschliesslich verwaiste Begleit-/Metadaten sind
+            # (niemals Audio, niemals Video, niemals PDF/Archive/sonstige Benutzerdateien!)
+            if remaining and all(
+                c.is_file()
+                and c.suffix.lower() in _ORPHAN_CLEANUP_EXTS
+                and c.suffix.lower() not in AUDIO_EXTS
+                and c.suffix.lower() not in VIDEO_EXTS
+                for c in remaining
+            ):
+                for orphan in remaining:
+                    try:
+                        orphan.unlink()
+                        removed_files += 1
+                    except OSError:
+                        pass
                 try:
-                    remaining[0].unlink()
-                    remaining = []
+                    remaining = list(cur.iterdir())
                 except OSError:
-                    pass
+                    remaining = []
+
             if not remaining:
                 try:
                     cur.rmdir()
-                    removed.append(cur.relative_to(MUSIC_DIR).as_posix())
+                    removed_dirs.append(cur.relative_to(MUSIC_DIR).as_posix())
                 except OSError:
                     pass
-    return removed
+
+        if top.exists():
+            kept_dirs.append(top.name)
+
+    return removed_dirs, removed_files, kept_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -2405,7 +2464,8 @@ def _execute_move_entries(
     if cfg.get("cleanupEmptyDirs", True):
         if touched_source_dirs:
             removed_dirs.extend(remove_truly_empty_dirs(touched_source_dirs))
-        removed_dirs.extend(cleanup_residual_source_dirs())
+        residual_dirs, _residual_files, _kept = cleanup_residual_source_dirs()
+        removed_dirs.extend(residual_dirs)
         removed_dirs = list(dict.fromkeys(removed_dirs))
         journal["removedEmptyDirs"] = list(
             dict.fromkeys((journal.get("removedEmptyDirs") or []) + removed_dirs)
@@ -2510,8 +2570,15 @@ async def api_rescan() -> Dict[str, Any]:
 
 @app.post("/api/cleanup-empty")
 async def api_cleanup_empty() -> Dict[str, Any]:
-    removed = await asyncio.to_thread(cleanup_residual_source_dirs)
-    return {"cleaned": True, "removedCount": len(removed), "removedDirs": removed[:50]}
+    removed_dirs, removed_files, kept_dirs = await asyncio.to_thread(cleanup_residual_source_dirs)
+    return {
+        "cleaned": True,
+        "removedCount": len(removed_dirs),
+        "removedFilesCount": removed_files,
+        "removedDirs": removed_dirs[:50],
+        "keptCount": len(kept_dirs),
+        "keptSample": kept_dirs[:10],
+    }
 
 
 @app.post("/api/backup/confirm")
