@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "TonArchiv",
+  "description": "Self-hosted Docker Audio-Tagger, Album-Release-Matcher, Künstler-Deduplizierer und Metadaten-Dashboard für Homeserver-Musikbibliotheken.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

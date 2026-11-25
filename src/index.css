@@ -1,1 +1,51 @@
 @import "tailwindcss";
+
+@theme {
+  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-studio-bg: #0f172a;
+  --color-studio-surface: #151e2e;
+  --color-studio-elevated: #1b263b;
+  --color-studio-border: #243044;
+  --color-studio-accent: #38bdf8;
+}
+
+:root {
+  color-scheme: dark;
+  --background: #0f172a;
+  --surface: #151e2e;
+  --border: #243044;
+  --primary: #38bdf8;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--background);
+  color: #f1f5f9;
+  letter-spacing: 0.005em;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  text-wrap: balance;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
