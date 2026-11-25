@@ -10,15 +10,15 @@ Kein lokales `npm install`, kein Build auf dem Homeserver nötig: GitHub Actions
 ### 1. Image automatisch auf GitHub bauen lassen (einmalig)
 1. Pushe dieses Repository auf GitHub (`main`).
 2. Unter **Actions → Build & Publish TonArchiv Docker Image** baut GitHub automatisch dein fertiges Image:
-   `ghcr.io/<dein-github-name>/<dein-repo>:latest`
-3. Öffne auf GitHub rechts unter **Packages → tonarchiv → Package settings** und stelle die Sichtbarkeit auf **Public** (dann kann Portainer/Docker ohne Registry-Login pullen).
+   `ghcr.io/finnh2008/audiomatchandsort:latest`
+3. Öffne auf GitHub rechts unter **Packages → audiomatchandsort → Package settings** und stelle die Sichtbarkeit auf **Public** (dann kann Portainer/Docker ohne Registry-Login pullen).
 
 ### 2. In Portainer / Docker Compose pullen & starten
 Füge die `docker-compose.yml` ein (oder wähle das GitHub-Repo in Portainer) und trage deine Umgebungsvariablen ein:
 
 | Variable | Pflicht? | Beispiel / Standard | Beschreibung |
 | :--- | :--- | :--- | :--- |
-| `TONARCHIV_IMAGE` | **Ja** | `ghcr.io/<user>/<repo>:latest` | Dein fertiges GHCR-Image |
+| `TONARCHIV_IMAGE` | Nein (vorbelegt) | `ghcr.io/finnh2008/audiomatchandsort:latest` | Dein fertiges GHCR-Image |
 | `HOST_MUSIC_DIR` | **Ja** | `/srv/Music Full Quality` | Musikordner auf dem Host (genau ein Mount!) |
 | `HOST_CONFIG_DIR` | Empfohlen | `/srv/tonarchiv/config` | Persistenter Ordner für Cache & Journal |
 | `TONARCHIV_PORT` | Nein | `7070` | Port für das Web-Dashboard |

@@ -9,7 +9,7 @@ interface DockerExportViewProps {
 }
 
 export function DockerExportView({ config }: DockerExportViewProps) {
-  const [repoSlug, setRepoSlug] = useState<string>('dein-github-user/tonarchiv');
+  const [repoSlug, setRepoSlug] = useState<string>('FinnH2008/AudioMatchandSort');
   const imageRef = useMemo(() => {
     const cleaned = repoSlug
       .trim()
@@ -18,7 +18,7 @@ export function DockerExportView({ config }: DockerExportViewProps) {
       .replace(/\.git$/i, '')
       .replace(/^\/+|\/+$/g, '')
       .toLowerCase();
-    if (!cleaned) return 'ghcr.io/dein-github-user/tonarchiv:latest';
+    if (!cleaned) return 'ghcr.io/finnh2008/audiomatchandsort:latest';
     return cleaned.includes(':') ? `ghcr.io/${cleaned}` : `ghcr.io/${cleaned}:latest`;
   }, [repoSlug]);
 

@@ -9,10 +9,11 @@ export interface GeneratedDockerFile {
 
 export function generateDockerBundle(
   config: PipelineConfig,
-  imageRef = 'ghcr.io/dein-github-user/tonarchiv:latest'
+  imageRef = 'ghcr.io/finnh2008/audiomatchandsort:latest'
 ): GeneratedDockerFile[] {
   const djLayoutEnv = config.djRemixLayout === 'root_folder' ? 'root_folder' : 'split_by_quality';
-  const normalizedImage = imageRef.trim().toLowerCase() || 'ghcr.io/dein-github-user/tonarchiv:latest';
+  const normalizedImage =
+    imageRef.trim().toLowerCase() || 'ghcr.io/finnh2008/audiomatchandsort:latest';
 
   const dockerCompose = `services:
   tonarchiv:
@@ -163,22 +164,16 @@ EXPOSE 7070
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \\
   CMD curl -fsS http://127.0.0.1:7070/api/health || exit 1
 
-# Startet als konfigurierte PUID/PGID, damit NAS-Dateirechte (SMB/Unraid/Synology) erhalten bleiben
-ENTRYPOINT ["/bin/sh", "-c", "mkdir -p \\"\${CONFIG_DIR:-${config.configDir}}\\" && (chown -R \\"\${PUID:-${config.puid}}:\${PGID:-${config.pgid}}\\" \\"\${CONFIG_DIR:-${config.configDir}}\\" || true) && exec gosu \\"\${PUID:-${config.puid}}:\${PGID:-${config.pgid}}\\" uvicorn app:app --host 0.0.0.0 --port 7070"]
+# Startet als konfigurierte PUID/PGID (mit Fallback, falls NAS-Mount chown blockiert)
+ENTRYPOINT ["/bin/sh", "-c", "CFG=\\"\${CONFIG_DIR:-${config.configDir}}\\"; UID_NUM=\\"\${PUID:-${config.puid}}\\"; GID_NUM=\\"\${PGID:-${config.pgid}}\\"; mkdir -p \\"$CFG\\" 2>/dev/null || true; chown -R \\"$UID_NUM:$GID_NUM\\" \\"$CFG\\" 2>/dev/null || true; echo \\"[TonArchiv] Starte FastAPI auf Port 7070 (CONFIG=$CFG, UID=$UID_NUM:$GID_NUM)\\"; if gosu \\"$UID_NUM:$GID_NUM\\" test -w \\"$CFG\\" 2>/dev/null; then exec gosu \\"$UID_NUM:$GID_NUM\\" uvicorn app:app --app-dir /app --host 0.0.0.0 --port 7070 --proxy-headers --log-level info; else echo \\"[TonArchiv] Warnung: $CFG fuer $UID_NUM:$GID_NUM nicht beschreibbar — starte ohne UID-Wechsel\\"; exec uvicorn app:app --app-dir /app --host 0.0.0.0 --port 7070 --proxy-headers --log-level info; fi"]
 `;
 
   const requirementsTxt = `fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 pydantic>=2.9.0
 mutagen>=1.47.0
-musicbrainzngs>=0.7.1
-pyacoustid>=1.3.0
-python3-discogs-client>=2.7
-syncedlyrics>=1.0.1
 requests>=2.32.0
 Pillow>=10.4.0
-# Optionales Fallback (per ENABLE_SHAZAMIO=false abschaltbar):
-shazamio>=0.7.0
 `;
 
   const envExample = `# =============================================================================

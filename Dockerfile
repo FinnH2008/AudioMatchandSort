@@ -51,5 +51,5 @@ EXPOSE 7070
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \
   CMD curl -fsS http://127.0.0.1:7070/api/health || exit 1
 
-# Startet als konfigurierte PUID/PGID, damit NAS-Dateirechte (SMB/Unraid/Synology) erhalten bleiben
-ENTRYPOINT ["/bin/sh", "-c", "mkdir -p \"${CONFIG_DIR:-/config}\" && (chown -R \"${PUID:-1000}:${PGID:-1000}\" \"${CONFIG_DIR:-/config}\" || true) && exec gosu \"${PUID:-1000}:${PGID:-1000}\" uvicorn app:app --host 0.0.0.0 --port 7070"]
+# Startet als konfigurierte PUID/PGID (mit Fallback, falls NAS-Mount chown blockiert)
+ENTRYPOINT ["/bin/sh", "-c", "CFG=\"${CONFIG_DIR:-/config}\"; UID_NUM=\"${PUID:-1000}\"; GID_NUM=\"${PGID:-1000}\"; mkdir -p \"$CFG\" 2>/dev/null || true; chown -R \"$UID_NUM:$GID_NUM\" \"$CFG\" 2>/dev/null || true; echo \"[TonArchiv] Starte FastAPI auf Port 7070 (CONFIG=$CFG, UID=$UID_NUM:$GID_NUM)\"; if gosu \"$UID_NUM:$GID_NUM\" test -w \"$CFG\" 2>/dev/null; then exec gosu \"$UID_NUM:$GID_NUM\" uvicorn app:app --app-dir /app --host 0.0.0.0 --port 7070 --proxy-headers --log-level info; else echo \"[TonArchiv] Warnung: $CFG fuer $UID_NUM:$GID_NUM nicht beschreibbar — starte ohne UID-Wechsel\"; exec uvicorn app:app --app-dir /app --host 0.0.0.0 --port 7070 --proxy-headers --log-level info; fi"]

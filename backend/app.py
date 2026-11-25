@@ -297,7 +297,23 @@ def safe_resolve_under_music(rel_path: str) -> Path:
 # 2. Persistenter SQLite-Cache & Fortschritts-Checkpoints
 # ---------------------------------------------------------------------------
 def init_cache_db() -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    global CONFIG_DIR, CACHE_DB_PATH, JOURNAL_PATH, STATE_PATH
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        probe = CONFIG_DIR / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        print(
+            f"[TonArchiv] Warnung: CONFIG_DIR={CONFIG_DIR} nicht beschreibbar ({exc}) — weiche auf /tmp/tonarchiv-config aus.",
+            flush=True,
+        )
+        CONFIG_DIR = Path("/tmp/tonarchiv-config")
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CACHE_DB_PATH = CONFIG_DIR / "cache.db"
+        JOURNAL_PATH = CONFIG_DIR / "rollback.json"
+        STATE_PATH = CONFIG_DIR / "state.json"
+
     with sqlite3.connect(CACHE_DB_PATH) as conn:
         conn.execute(
             """

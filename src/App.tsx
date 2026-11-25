@@ -217,6 +217,7 @@ export default function App() {
   }, [checkAndLoadBackend]);
 
   // Live polling when FastAPI background queue (e.g. AUTO_ANALYZE_ON_START or Mode 1) is active
+  const lastSyncedCountRef = useRef<number>(-1);
   useEffect(() => {
     if (!backendConnected) return;
     if (queue.status !== 'running' && queue.status !== 'paused') return;
@@ -224,12 +225,25 @@ export default function App() {
       const liveQueue = await fetchBackendQueue(backendUrl);
       if (!liveQueue) return;
       setQueue(liveQueue);
-      if (liveQueue.status === 'completed' || liveQueue.status === 'idle') {
+
+      const shouldProgressiveSync =
+        (tracks.length === 0 && liveQueue.totalCount > 0) ||
+        (liveQueue.processedCount > 0 &&
+          liveQueue.processedCount !== lastSyncedCountRef.current &&
+          liveQueue.processedCount % 5 === 0);
+
+      if (
+        liveQueue.status === 'completed' ||
+        liveQueue.status === 'idle' ||
+        liveQueue.status === 'error' ||
+        shouldProgressiveSync
+      ) {
+        lastSyncedCountRef.current = liveQueue.processedCount;
         await checkAndLoadBackend(backendUrl, true);
       }
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [backendConnected, backendUrl, queue.status, checkAndLoadBackend]);
+  }, [backendConnected, backendUrl, queue.status, tracks.length, checkAndLoadBackend]);
 
   // Real local folder ingestion via music-metadata
   const handleImportLocalFiles = useCallback(
