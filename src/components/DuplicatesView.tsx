@@ -83,34 +83,41 @@ export function DuplicatesView({
           </div>
         </div>
 
-        {actionableGroups.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 shrink-0 w-full lg:w-auto">
-            <button
-              type="button"
-              onClick={onConfirmAllRecommendations}
-              disabled={unconfirmedCount === 0}
-              className={`flex-1 lg:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-md text-xs font-semibold whitespace-nowrap transition-colors ${
-                unconfirmedCount === 0
+        <div className="flex flex-wrap items-center gap-2 shrink-0 w-full lg:w-auto">
+          <button
+            type="button"
+            onClick={onConfirmAllRecommendations}
+            disabled={actionableGroups.length === 0 || unconfirmedCount === 0}
+            className={`flex-1 lg:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-md text-xs font-semibold whitespace-nowrap transition-colors ${
+              actionableGroups.length === 0
+                ? 'bg-[#0F172A] text-slate-500 border border-[#243044] cursor-not-allowed'
+                : unconfirmedCount === 0
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 cursor-default'
                   : 'bg-sky-400 text-slate-950 hover:bg-sky-300'
-              }`}
-            >
-              <Check className="h-3.5 w-3.5" />
-              <span>
-                {unconfirmedCount === 0
+            }`}
+          >
+            <Check className="h-3.5 w-3.5" />
+            <span>
+              {actionableGroups.length === 0
+                ? 'Alle Empfehlungen befolgen (0)'
+                : unconfirmedCount === 0
                   ? `Alle ${actionableGroups.length} Empfehlungen bestätigt`
                   : `Alle Empfehlungen befolgen (${unconfirmedCount})`}
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={onKeepAllDuplicates}
-              className="flex-1 lg:flex-none min-h-[42px] px-3.5 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-300 text-xs font-medium hover:border-slate-500 whitespace-nowrap"
-            >
-              Alle behalten
-            </button>
-          </div>
-        )}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={onKeepAllDuplicates}
+            disabled={actionableGroups.length === 0}
+            className={`flex-1 lg:flex-none min-h-[42px] px-3.5 py-2 rounded-md border text-xs font-medium whitespace-nowrap ${
+              actionableGroups.length === 0
+                ? 'border-[#243044] bg-[#0F172A] text-slate-500 cursor-not-allowed'
+                : 'border-[#243044] bg-[#0F172A] text-slate-300 hover:border-slate-500'
+            }`}
+          >
+            Alle behalten
+          </button>
+        </div>
       </div>
 
       {/* Section 1: Actionable Duplicate Groups */}
