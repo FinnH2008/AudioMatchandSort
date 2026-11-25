@@ -1,0 +1,24 @@
+services:
+  tonarchiv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_ESSENTIA: "${ENABLE_ESSENTIA:-false}"
+    image: tonarchiv:latest
+    container_name: tonarchiv
+    restart: unless-stopped
+    ports:
+      - "${TONARCHIV_PORT:-7070}:7070"
+    env_file:
+      - .env
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      MUSIC_DIR: "${MUSIC_DIR:-/srv/Music Full Quality}"
+      CONFIG_DIR: "${CONFIG_DIR:-/config}"
+    volumes:
+      # WICHTIG: Genau ein einzelner Mount fuer atomares Verschieben im selben Dateisystem
+      - "${HOST_MUSIC_DIR:-/srv/Music Full Quality}:${MUSIC_DIR:-/srv/Music Full Quality}"
+      # Persistente SQLite-Cache-DB (cache.db) und atomares Journal (rollback.json)
+      - "${HOST_CONFIG_DIR:-./config}:${CONFIG_DIR:-/config}"

@@ -1018,6 +1018,8 @@ export function computeNextModeAction(params: {
   pendingReRunCount: number;
   queueRunningOrPaused: boolean;
   hasInterruptedJournal: boolean;
+  totalTracks?: number;
+  backendConnected?: boolean;
 }): NextModeAction {
   if (params.hasInterruptedJournal) {
     return {
@@ -1037,13 +1039,26 @@ export function computeNextModeAction(params: {
     };
   }
 
+  if (params.totalTracks === 0) {
+    return {
+      mode: 'analyze',
+      label: 'Keine Dateien geladen',
+      enabled: false,
+      blockReason:
+        'Bitte zuerst das TonArchiv Docker-Backend verbinden oder einen lokalen Musikordner einlesen.',
+    };
+  }
+
+  const canWriteFs = params.backendConnected !== false;
+
   if (params.mode3Completed && params.pendingReRunCount > 0) {
     return {
       mode: 'rerun',
       label: `Re-Run: Taggen & verschieben (${params.pendingReRunCount})`,
-      enabled: params.openArtistConflictCount === 0 && params.pathCollisionCount === 0,
-      blockReason:
-        params.openArtistConflictCount > 0
+      enabled: canWriteFs && params.openArtistConflictCount === 0 && params.pathCollisionCount === 0,
+      blockReason: !canWriteFs
+        ? 'Schreibzugriff erfordert das verbundene TonArchiv Docker-Backend.'
+        : params.openArtistConflictCount > 0
           ? 'Bitte zuerst offene Künstlerkonflikte lösen.'
           : params.pathCollisionCount > 0
             ? 'Bitte zuerst Pfadkollisionen beheben.'
@@ -1061,6 +1076,15 @@ export function computeNextModeAction(params: {
   }
 
   if (!params.mode2Completed) {
+    if (!canWriteFs) {
+      return {
+        mode: 'tag',
+        label: 'Modus 2: Taggen (Docker-Backend nötig)',
+        enabled: false,
+        blockReason:
+          'Schreiben von Tags, Cover & Lyrics in Originaldateien erfordert den verbundenen TonArchiv FastAPI-Container.',
+      };
+    }
     return {
       mode: 'tag',
       label: 'Modus 2: Taggen',
@@ -1070,6 +1094,15 @@ export function computeNextModeAction(params: {
   }
 
   if (!params.mode3Completed) {
+    if (!canWriteFs) {
+      return {
+        mode: 'move',
+        label: 'Modus 3: Verschieben (Docker-Backend nötig)',
+        enabled: false,
+        blockReason:
+          'Atomares Verschieben und Aufräumen erfordert den verbundenen TonArchiv FastAPI-Container.',
+      };
+    }
     if (params.openArtistConflictCount > 0) {
       return {
         mode: 'move',

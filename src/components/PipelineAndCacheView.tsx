@@ -1,20 +1,20 @@
-import { AlertTriangle, Database, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react';
+import { AlertTriangle, Database, ShieldCheck, Trash2 } from 'lucide-react';
 import { PipelineConfig, SqliteCacheState } from '../types/tonarchiv';
 
 interface PipelineAndCacheViewProps {
   config: PipelineConfig;
   cache: SqliteCacheState;
+  backendConnected: boolean;
   onChangeConfig: (patch: Partial<PipelineConfig>) => void;
   onClearCache: () => void;
-  onSimulateAnalyzeCheckpoint: () => void;
 }
 
 export function PipelineAndCacheView({
   config,
   cache,
+  backendConnected,
   onChangeConfig,
   onClearCache,
-  onSimulateAnalyzeCheckpoint,
 }: PipelineAndCacheViewProps) {
   const totalCacheRows =
     cache.fingerprintEntries + cache.mbReleaseEntries + cache.coverEntries + cache.lyricsEntries;
@@ -89,15 +89,13 @@ export function PipelineAndCacheView({
               Compilation-Suche bei Samplern, automatischer Backoff bei HTTP 429/503.
             </p>
           </div>
-          <label className="inline-flex items-center gap-2 text-xs text-slate-300 whitespace-nowrap cursor-pointer">
-            <input
-              type="checkbox"
-              checked={config.acoustidKeyConfigured}
-              onChange={(e) => onChangeConfig({ acoustidKeyConfigured: e.target.checked })}
-              className="h-4 w-4 rounded border-slate-600 bg-[#0F172A] accent-sky-400"
-            />
-            <span className="font-mono">ACOUSTID_API_KEY in .env gesetzt</span>
-          </label>
+          <div className="font-mono text-xs text-slate-400 whitespace-nowrap">
+            {!backendConnected
+              ? 'ACOUSTID_API_KEY: Docker-Backend nicht verbunden'
+              : config.acoustidKeyConfigured
+                ? 'ACOUSTID_API_KEY in .env aktiv'
+                : 'ACOUSTID_API_KEY fehlt in .env'}
+          </div>
         </div>
 
         {/* Stage 2: Optional ShazamIO */}
@@ -150,15 +148,13 @@ export function PipelineAndCacheView({
               Verifiziert Vinyl-, Club- und EP-Releases sowie ISRCs mit Token-Bucket-Rate-Limiter.
             </p>
           </div>
-          <label className="inline-flex items-center gap-2 text-xs text-slate-300 whitespace-nowrap cursor-pointer">
-            <input
-              type="checkbox"
-              checked={config.discogsTokenConfigured}
-              onChange={(e) => onChangeConfig({ discogsTokenConfigured: e.target.checked })}
-              className="h-4 w-4 rounded border-slate-600 bg-[#0F172A] accent-sky-400"
-            />
-            <span className="font-mono">DISCOGS_TOKEN in .env gesetzt</span>
-          </label>
+          <div className="font-mono text-xs text-slate-400 whitespace-nowrap">
+            {!backendConnected
+              ? 'DISCOGS_TOKEN: Docker-Backend nicht verbunden'
+              : config.discogsTokenConfigured
+                ? 'DISCOGS_TOKEN in .env aktiv'
+                : 'DISCOGS_TOKEN fehlt in .env'}
+          </div>
         </div>
 
         {/* Stage 4: Optional Essentia */}
@@ -231,14 +227,6 @@ export function PipelineAndCacheView({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={onSimulateAnalyzeCheckpoint}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-[#243044] bg-[#0F172A] text-xs text-slate-200 hover:border-amber-400"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              <span>Checkpoint-Abbruch simulieren</span>
-            </button>
             <button
               type="button"
               onClick={onClearCache}

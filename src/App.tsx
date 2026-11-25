@@ -9,12 +9,8 @@ import { RulesAndFoldersView } from './components/RulesAndFoldersView';
 import { NavSectionId, Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { TrackInspectorDrawer } from './components/TrackInspectorDrawer';
-import {
-  createSeedCompanions,
-  createSeedLeftovers,
-  createSeedTracks,
-  DEFAULT_CONFIG,
-} from './data/seedLibrary';
+import { DEFAULT_CONFIG } from './config/defaultConfig';
+import { fetchBackendHealth, fetchBackendState, postBackendAction } from './engine/apiClient';
 import { ArtistResolutionOverrides } from './engine/artistDedupe';
 import {
   computeNextModeAction,
@@ -22,19 +18,22 @@ import {
   evaluateLibraryPlan,
 } from './engine/classifierAndPlanner';
 import {
+  clearBrowserLookupCache,
+  runLiveLookupForTrack,
+  scanLocalFileList,
+} from './engine/localFolderScanner';
+import {
   ArtistClusterStatus,
   AudioTrack,
   BackgroundQueueState,
   CompanionFile,
   DuplicateDecision,
-  JournalEntry,
   LeftoverFile,
   ManualAssignment,
   PipelineConfig,
   RollbackJournal,
   SourceProvider,
   SqliteCacheState,
-  WorkflowModeId,
 } from './types/tonarchiv';
 
 const INITIAL_QUEUE: BackgroundQueueState = {
@@ -62,10 +61,10 @@ const INITIAL_JOURNAL: RollbackJournal = {
 
 const INITIAL_CACHE: SqliteCacheState = {
   dbPath: '/config/cache.db',
-  fingerprintEntries: 11,
-  mbReleaseEntries: 10,
-  coverEntries: 15,
-  lyricsEntries: 12,
+  fingerprintEntries: 0,
+  mbReleaseEntries: 0,
+  coverEntries: 0,
+  lyricsEntries: 0,
   lastCheckpointIso: null,
   interruptedAnalyzeCheckpoint: null,
 };
@@ -75,9 +74,17 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const [config, setConfig] = useState<PipelineConfig>(DEFAULT_CONFIG);
-  const [tracks, setTracks] = useState<AudioTrack[]>(() => createSeedTracks());
-  const [companions, setCompanions] = useState<CompanionFile[]>(() => createSeedCompanions());
-  const [leftovers] = useState<LeftoverFile[]>(() => createSeedLeftovers());
+  const [tracks, setTracks] = useState<AudioTrack[]>([]);
+  const [companions, setCompanions] = useState<CompanionFile[]>([]);
+  const [leftovers, setLeftovers] = useState<LeftoverFile[]>([]);
+
+  // Production source state
+  const [backendUrl, setBackendUrl] = useState('');
+  const [backendConnected, setBackendConnected] = useState(false);
+  const [backendChecking, setBackendChecking] = useState(false);
+  const [importingFiles, setImportingFiles] = useState(false);
+  const [importProgressLabel, setImportProgressLabel] = useState('');
+  const [activeSourceLabel, setActiveSourceLabel] = useState<string | null>(null);
 
   const [artistOverrides, setArtistOverrides] = useState<ArtistResolutionOverrides>({
     decisions: {},
@@ -107,11 +114,9 @@ export default function App() {
   );
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const queueTimerRef = useRef<number | null>(null);
-  const queuePausedRef = useRef(false);
-  const queueIndexRef = useRef(0);
-  const queueTrackIdsRef = useRef<string[]>([]);
-  const queueActiveModeRef = useRef<WorkflowModeId | 'rerun' | null>(null);
+  const pauseRef = useRef(false);
+  const abortRunRef = useRef(false);
+  const coverObjectUrlsRef = useRef<string[]>([]);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -119,6 +124,140 @@ export default function App() {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 2800);
   }, []);
+
+  const revokeCoverUrls = useCallback(() => {
+    coverObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    coverObjectUrlsRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      abortRunRef.current = true;
+      revokeCoverUrls();
+    };
+  }, [revokeCoverUrls]);
+
+  // Connect to real FastAPI Single-Container backend if available
+  const checkAndLoadBackend = useCallback(
+    async (targetUrl: string, silent = false) => {
+      setBackendChecking(true);
+      const health = await fetchBackendHealth(targetUrl);
+      if (!health) {
+        setBackendConnected(false);
+        setBackendChecking(false);
+        if (!silent) {
+          showToast(
+            'Kein TonArchiv FastAPI-Backend erreichbar. Nutze den lokalen Ordner-Scan oder starte den Docker-Container.'
+          );
+        }
+        return;
+      }
+
+      setBackendConnected(true);
+      if (targetUrl.trim() && typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem('tonarchiv:backendUrl', targetUrl.trim());
+        } catch {
+          // Ignore storage quota errors
+        }
+      }
+      setConfig((prev) => ({
+        ...prev,
+        containerMusicDir: health.music_dir || prev.containerMusicDir,
+        essentiaAvailable: health.essentia_available,
+        acoustidKeyConfigured: health.acoustid_configured,
+        discogsTokenConfigured: health.discogs_configured,
+        enableShazamFallback: health.shazamio_enabled,
+        wavEmbedMedia: health.wav_embed_media,
+      }));
+
+      const state = await fetchBackendState(targetUrl);
+      if (state) {
+        revokeCoverUrls();
+        setTracks(state.tracks ?? []);
+        setCompanions(state.companions ?? []);
+        setLeftovers(state.leftovers ?? []);
+        setJournal(state.journal ?? INITIAL_JOURNAL);
+        setCache(state.cache ?? INITIAL_CACHE);
+        setMode1Completed(Boolean(state.mode1Completed));
+        setMode2Completed(Boolean(state.mode2Completed));
+        setMode3Completed(Boolean(state.mode3Completed));
+        setActiveSourceLabel(health.music_dir || config.containerMusicDir);
+      }
+
+      setBackendChecking(false);
+      if (!silent) {
+        showToast(`Mit TonArchiv FastAPI-Backend (${health.music_dir}) verbunden.`);
+      }
+    },
+    [config.containerMusicDir, revokeCoverUrls, showToast]
+  );
+
+  useEffect(() => {
+    const savedBackendUrl =
+      typeof window !== 'undefined' ? window.localStorage.getItem('tonarchiv:backendUrl') : null;
+    if (savedBackendUrl) {
+      setBackendUrl(savedBackendUrl);
+      void checkAndLoadBackend(savedBackendUrl, true);
+    } else if (import.meta.env.PROD) {
+      void checkAndLoadBackend('', true);
+    }
+  }, [checkAndLoadBackend]);
+
+  // Real local folder ingestion via music-metadata
+  const handleImportLocalFiles = useCallback(
+    async (files: FileList) => {
+      abortRunRef.current = true;
+      setImportingFiles(true);
+      setImportProgressLabel(`0 / ${files.length}`);
+      revokeCoverUrls();
+
+      const scanned = await scanLocalFileList(files, (done, total, name) => {
+        setImportProgressLabel(`${done} / ${total} · ${name}`);
+      });
+
+      const createdUrls = scanned.tracks
+        .map((t) => t.cover.imageUrl)
+        .filter((u): u is string => Boolean(u && u.startsWith('blob:')));
+      coverObjectUrlsRef.current = createdUrls;
+
+      setTracks(scanned.tracks);
+      setCompanions(scanned.companions);
+      setLeftovers(scanned.leftovers);
+      setActiveSourceLabel(scanned.rootFolderName);
+      setMode1Completed(false);
+      setMode2Completed(false);
+      setMode3Completed(false);
+      setQueue(INITIAL_QUEUE);
+      setJournal(INITIAL_JOURNAL);
+      setArtistOverrides({ decisions: {}, renamedCanonical: {} });
+      setDuplicateOverrides({ decisions: {}, selectedOriginals: {} });
+      setImportingFiles(false);
+      setImportProgressLabel('');
+
+      showToast(
+        `${scanned.tracks.length} Audiodatei(en), ${scanned.companions.length} Begleitdatei(en) und ${scanned.leftovers.length} Restdatei(en) aus „${scanned.rootFolderName}“ eingelesen.`
+      );
+    },
+    [revokeCoverUrls, showToast]
+  );
+
+  const handleClearLoadedLibrary = useCallback(() => {
+    abortRunRef.current = true;
+    revokeCoverUrls();
+    setTracks([]);
+    setCompanions([]);
+    setLeftovers([]);
+    setActiveSourceLabel(null);
+    setMode1Completed(false);
+    setMode2Completed(false);
+    setMode3Completed(false);
+    setQueue(INITIAL_QUEUE);
+    setJournal(INITIAL_JOURNAL);
+    setSelectedTrackId(null);
+    setSearchQuery('');
+    setActiveFilter('all');
+  }, [revokeCoverUrls]);
 
   // Deterministic live plan evaluation
   const evaluation = useMemo(
@@ -151,6 +290,8 @@ export default function App() {
         queueRunningOrPaused: queue.status === 'running' || queue.status === 'paused',
         hasInterruptedJournal:
           journal.state === 'interrupted' || cache.interruptedAnalyzeCheckpoint !== null,
+        totalTracks: tracks.length,
+        backendConnected,
       }),
     [
       mode1Completed,
@@ -162,349 +303,135 @@ export default function App() {
       queue.status,
       journal.state,
       cache.interruptedAnalyzeCheckpoint,
+      tracks.length,
+      backendConnected,
     ]
   );
 
-  const clearQueueTimer = () => {
-    if (queueTimerRef.current !== null) {
-      window.clearInterval(queueTimerRef.current);
-      queueTimerRef.current = null;
-    }
-  };
+  // Real Mode 1 live analysis runner (rate-limited MusicBrainz + LRCLIB + Cover Art Archive)
+  const runLocalMode1Analysis = useCallback(
+    async (startAtIndex = 0) => {
+      const snapshotTracks = [...tracks];
+      if (snapshotTracks.length === 0) return;
 
-  useEffect(() => {
-    return () => clearQueueTimer();
-  }, []);
-
-  // Executes one step of the async background queue for Mode 1, Mode 2, Mode 3, or Re-Run (Mode 2 + Mode 3)
-  const startBackgroundQueue = useCallback(
-    (
-      mode: WorkflowModeId | 'rerun',
-      targetTrackIds: string[],
-      startAtIndex = 0
-    ) => {
-      clearQueueTimer();
-      queuePausedRef.current = false;
-      queueIndexRef.current = startAtIndex;
-      queueTrackIdsRef.current = targetTrackIds;
-      queueActiveModeRef.current = mode;
-
-      const total = targetTrackIds.length;
-      if (total === 0) return;
-
-      const runId = `run-${Date.now()}`;
-      if (mode === 'tag' || mode === 'move' || mode === 'rerun') {
-        setJournal((prev) => ({
-          ...prev,
-          runId,
-          mode,
-          state: 'in_progress',
-          lastFsyncIso: new Date().toISOString(),
-        }));
-      }
+      abortRunRef.current = false;
+      pauseRef.current = false;
 
       setQueue({
-        activeMode: mode,
+        activeMode: 'analyze',
         status: 'running',
         processedCount: startAtIndex,
-        totalCount: total,
+        totalCount: snapshotTracks.length,
         errorCount: 0,
         cacheHitCount: 0,
-        etaSeconds: Math.max(1, Math.ceil((total - startAtIndex) * 0.12)),
+        etaSeconds: Math.max(1, snapshotTracks.length - startAtIndex),
         currentTrackLabel: '',
         checkpointIndex: startAtIndex,
         errors: [],
       });
 
-      const tick = () => {
-        if (queuePausedRef.current) return;
-        const idx = queueIndexRef.current;
-        const ids = queueTrackIdsRef.current;
-        const activeMode = queueActiveModeRef.current;
+      let mbCount = 0;
+      let coverCount = 0;
+      let lyricsCount = 0;
 
-        if (!activeMode || idx >= ids.length) {
-          clearQueueTimer();
-          if (activeMode === 'analyze') {
-            setMode1Completed(true);
-            setCache((prev) => ({
-              ...prev,
-              fingerprintEntries: tracks.length,
-              mbReleaseEntries: 11,
-              coverEntries: 17,
-              lyricsEntries: 14,
-              lastCheckpointIso: new Date().toISOString(),
-              interruptedAnalyzeCheckpoint: null,
-            }));
-            showToast('Modus 1 abgeschlossen — Analysebericht erstellt (Read-Only).');
-          } else if (activeMode === 'tag') {
-            setMode2Completed(true);
-            setJournal((prev) => ({
-              ...prev,
-              state: 'completed',
-              lastFsyncIso: new Date().toISOString(),
-            }));
-            showToast(
-              'Modus 2 abgeschlossen — Tags, Cover & Lyrics geschrieben (Original-Tags in rollback.json).'
-            );
-          } else if (activeMode === 'move') {
-            setMode3Completed(true);
-            // Move companion files and record truly empty dirs removed
-            setCompanions((prev) =>
-              prev.map((c) => {
-                const evaluated = evaluation.evaluatedCompanions.find((ec) => ec.id === c.id);
-                return {
-                  ...c,
-                  targetPath: evaluated?.targetPath ?? c.targetPath,
-                  moved: Boolean(config.moveCompanionFiles && evaluated?.targetPath),
-                };
-              })
-            );
-            setJournal((prev) => ({
-              ...prev,
-              state: 'completed',
-              lastFsyncIso: new Date().toISOString(),
-              removedEmptyDirs: config.cleanupEmptyDirs
-                ? [
-                    'apple_lossless/Royksopp_MelodyAM',
-                    'classics/Simon_and_Garfunkel',
-                    'itunes_downloads/Tyler_IGOR',
-                    'albums_flac/Dua_Lipa_Club_Future_Nostalgia',
-                    'albums_flac/Fred_Again_AL3',
-                    'sampler/Bravo_Hits_124',
-                  ]
-                : [],
-            }));
-            showToast(
-              'Modus 3 abgeschlossen — Alben, Begleitdateien & _Review/ atomar verschoben.'
-            );
-          } else if (activeMode === 'rerun') {
-            setJournal((prev) => ({
-              ...prev,
-              state: 'completed',
-              lastFsyncIso: new Date().toISOString(),
-            }));
-            showToast(
-              `Gezielter Re-Run (Modus 2 + Modus 3) für ${ids.length} Track(s) abgeschlossen.`
-            );
-          }
+      for (let i = startAtIndex; i < snapshotTracks.length; i++) {
+        if (abortRunRef.current) return;
 
-          setQueue((prev) => ({
-            ...prev,
-            status: 'completed',
-            processedCount: ids.length,
-            etaSeconds: 0,
-            currentTrackLabel: '',
-            checkpointIndex: ids.length,
-          }));
-          return;
+        while (pauseRef.current) {
+          if (abortRunRef.current) return;
+          await new Promise((r) => setTimeout(r, 120));
         }
 
-        const trackId = ids[idx];
-        const track = tracks.find((t) => t.id === trackId);
-        const plan = evaluation.trackPlans.get(trackId);
-        const nowIso = new Date().toISOString();
+        const track = snapshotTracks[i];
+        setQueue((prev) => ({
+          ...prev,
+          currentTrackLabel: `${track.artist} — ${track.title}`,
+          etaSeconds: Math.max(1, snapshotTracks.length - i),
+        }));
 
-        if (track && plan) {
-          if (activeMode === 'analyze') {
-            setTracks((prev) =>
-              prev.map((t) =>
-                t.id === trackId && t.status === 'pending' ? { ...t, status: 'analyzed' } : t
-              )
-            );
-            // Demonstrate graceful non-fatal ShazamIO rate-limit handling on one bootleg track
-            const triggerRecoverableShazamWarn =
-              track.id === 'trk-05' && config.enableShazamFallback && !track.cachedLookup;
+        const lookup = await runLiveLookupForTrack(track, {
+          fetchCover: config.embedCover,
+          fetchLyrics: config.fetchLyrics,
+        });
 
-            setQueue((prev) => ({
-              ...prev,
-              processedCount: idx + 1,
-              cacheHitCount: prev.cacheHitCount + (track.cachedLookup ? 1 : 0),
-              errorCount: prev.errorCount + (triggerRecoverableShazamWarn ? 1 : 0),
-              etaSeconds: Math.max(0, Math.ceil((ids.length - idx - 1) * 0.12)),
-              currentTrackLabel: `${track.artist} — ${track.title}`,
-              checkpointIndex: idx + 1,
-              errors: triggerRecoverableShazamWarn
-                ? [
-                    ...prev.errors,
-                    {
-                      id: `err-${track.id}`,
-                      stage: 'ShazamIO',
-                      trackLabel: track.fileName,
-                      message: 'Temporäres Rate-Limit (HTTP 429) — Backoff & Fallback erfolgreich',
-                      recovered: true,
-                    },
-                  ]
-                : prev.errors,
-            }));
-          } else if (activeMode === 'tag') {
-            const skippedConflict = plan.hasOpenArtistConflict;
-            const skippedLowConf =
-              !skippedConflict &&
-              plan.willSkipInMode2;
+        if (abortRunRef.current) return;
 
-            if (!skippedConflict && !skippedLowConf) {
-              // Write-Ahead Journal entry: pending -> done with Original Tags Snapshot
-              const entry: JournalEntry = {
-                id: `j-tag-${track.id}-${idx}`,
-                kind: 'tag',
-                trackId: track.id,
-                fromPath: track.sourceRelativePath,
-                toPath: track.sourceRelativePath,
-                originalTags: { ...track.originalTags },
-                status: 'done',
-                timestampIso: nowIso,
-              };
-              setJournal((prev) => ({
-                ...prev,
-                lastFsyncIso: nowIso,
-                entries: [...prev.entries, entry],
-              }));
-            }
+        if (lookup.mbHit) mbCount += 1;
+        if (lookup.coverHit) coverCount += 1;
+        if (lookup.lyricsHit) lyricsCount += 1;
 
-            setTracks((prev) =>
-              prev.map((t) => {
-                if (t.id !== trackId) return t;
-                if (skippedConflict) {
-                  return {
-                    ...t,
-                    status: 'skipped_artist_conflict',
-                    skippedInMode2Reason: plan.skipMode2Reason,
-                  };
-                }
-                if (skippedLowConf) {
-                  return {
-                    ...t,
-                    status: 'skipped_low_confidence',
-                    skippedInMode2Reason: plan.skipMode2Reason,
-                  };
-                }
-                return {
+        setTracks((prev) =>
+          prev.map((t) =>
+            t.id === track.id
+              ? {
                   ...t,
-                  albumArtist:
-                    plan.classification === 'dj_remix'
-                      ? t.originalTags.albumArtist
-                      : plan.resolvedAlbumArtist,
-                  status: 'tagged',
-                  taggedAt: nowIso,
-                  skippedInMode2Reason: null,
-                };
-              })
-            );
+                  ...lookup.trackPatch,
+                  status: t.status === 'pending' ? 'analyzed' : t.status,
+                }
+              : t
+          )
+        );
 
-            setQueue((prev) => ({
-              ...prev,
-              processedCount: idx + 1,
-              etaSeconds: Math.max(0, Math.ceil((ids.length - idx - 1) * 0.1)),
-              currentTrackLabel: `${track.artist} — ${track.title}`,
-              checkpointIndex: idx + 1,
-            }));
-          } else if (activeMode === 'move') {
-            const entry: JournalEntry = {
-              id: `j-move-${track.id}-${idx}`,
-              kind: 'move_track',
-              trackId: track.id,
-              fromPath: track.sourceRelativePath,
-              toPath: plan.targetRelativePath,
-              originalTags: { ...track.originalTags },
-              status: 'done',
-              timestampIso: nowIso,
-            };
-            setJournal((prev) => ({
-              ...prev,
-              lastFsyncIso: nowIso,
-              entries: [...prev.entries, entry],
-            }));
+        setQueue((prev) => ({
+          ...prev,
+          processedCount: i + 1,
+          cacheHitCount: prev.cacheHitCount + (lookup.cacheHit ? 1 : 0),
+          errorCount: prev.errorCount + (lookup.recoverableError ? 1 : 0),
+          etaSeconds: Math.max(0, snapshotTracks.length - (i + 1)),
+          checkpointIndex: i + 1,
+          errors: lookup.recoverableError
+            ? [
+                ...prev.errors,
+                {
+                  id: `err-${track.id}-${i}`,
+                  stage: 'MusicBrainz',
+                  trackLabel: track.fileName,
+                  message: lookup.recoverableError,
+                  recovered: true,
+                },
+              ]
+            : prev.errors,
+        }));
+      }
 
-            setTracks((prev) =>
-              prev.map((t) =>
-                t.id === trackId
-                  ? {
-                      ...t,
-                      status: 'moved',
-                      movedToPath: plan.targetRelativePath,
-                    }
-                  : t
-              )
-            );
-
-            setQueue((prev) => ({
-              ...prev,
-              processedCount: idx + 1,
-              etaSeconds: Math.max(0, Math.ceil((ids.length - idx - 1) * 0.08)),
-              currentTrackLabel: `→ ${plan.targetRelativePath}`,
-              checkpointIndex: idx + 1,
-            }));
-          } else if (activeMode === 'rerun') {
-            // Combined Mode 2 (Tagging + Original-Tags in Journal) -> Mode 3 (Atomic Move)
-            const tagEntry: JournalEntry = {
-              id: `j-rerun-tag-${track.id}-${idx}`,
-              kind: 'tag',
-              trackId: track.id,
-              fromPath: track.movedToPath ?? track.sourceRelativePath,
-              toPath: track.movedToPath ?? track.sourceRelativePath,
-              originalTags: { ...track.originalTags },
-              status: 'done',
-              timestampIso: nowIso,
-            };
-            const moveEntry: JournalEntry = {
-              id: `j-rerun-move-${track.id}-${idx}`,
-              kind: 'move_track',
-              trackId: track.id,
-              fromPath: track.movedToPath ?? track.sourceRelativePath,
-              toPath: plan.targetRelativePath,
-              originalTags: { ...track.originalTags },
-              status: 'done',
-              timestampIso: nowIso,
-            };
-            setJournal((prev) => ({
-              ...prev,
-              lastFsyncIso: nowIso,
-              entries: [...prev.entries, tagEntry, moveEntry],
-            }));
-
-            setTracks((prev) =>
-              prev.map((t) =>
-                t.id === trackId
-                  ? {
-                      ...t,
-                      taggedAt: nowIso,
-                      movedToPath: plan.targetRelativePath,
-                      pendingReRunTagAndMove: false,
-                      status: 'moved',
-                    }
-                  : t
-              )
-            );
-
-            setQueue((prev) => ({
-              ...prev,
-              processedCount: idx + 1,
-              etaSeconds: Math.max(0, Math.ceil((ids.length - idx - 1) * 0.1)),
-              currentTrackLabel: `Re-Run M2+M3 → ${plan.targetRelativePath}`,
-              checkpointIndex: idx + 1,
-            }));
-          }
-        }
-
-        queueIndexRef.current = idx + 1;
-      };
-
-      queueTimerRef.current = window.setInterval(tick, 90);
+      setMode1Completed(true);
+      setCache((prev) => ({
+        ...prev,
+        mbReleaseEntries: prev.mbReleaseEntries + mbCount,
+        coverEntries: prev.coverEntries + coverCount,
+        lyricsEntries: prev.lyricsEntries + lyricsCount,
+        lastCheckpointIso: new Date().toISOString(),
+        interruptedAnalyzeCheckpoint: null,
+      }));
+      setQueue((prev) => ({
+        ...prev,
+        status: 'completed',
+        processedCount: snapshotTracks.length,
+        etaSeconds: 0,
+        currentTrackLabel: '',
+      }));
+      showToast('Modus 1 abgeschlossen — Analysebericht erstellt (Read-Only).');
     },
-    [config.cleanupEmptyDirs, config.enableShazamFallback, config.moveCompanionFiles, evaluation, showToast, tracks]
+    [config.embedCover, config.fetchLyrics, showToast, tracks]
   );
 
-  // Primary Top-Bar CTA handler
-  const handleTriggerPrimaryAction = () => {
+  // Trigger real FastAPI backend mode when connected, or real local Mode 1 when in browser mode
+  const handleTriggerPrimaryAction = async () => {
     if (!nextModeAction.enabled) return;
     setActiveSection('library');
 
     if (nextModeAction.mode === 'analyze') {
-      startBackgroundQueue(
-        'analyze',
-        tracks.map((t) => t.id),
-        0
-      );
+      if (backendConnected) {
+        await postBackendAction(backendUrl, '/api/mode/analyze', { config });
+        await checkAndLoadBackend(backendUrl, true);
+      } else {
+        void runLocalMode1Analysis(0);
+      }
+      return;
+    }
+
+    if (!backendConnected) {
+      showToast('Schreibzugriff erfordert das verbundene TonArchiv FastAPI Docker-Backend.');
       return;
     }
 
@@ -514,148 +441,98 @@ export default function App() {
         setBackupModalOpen(true);
         return;
       }
-      startBackgroundQueue(
-        'tag',
-        tracks.map((t) => t.id),
-        0
-      );
+      await postBackendAction(backendUrl, '/api/mode/tag', { config });
+      await checkAndLoadBackend(backendUrl, true);
       return;
     }
 
     if (nextModeAction.mode === 'move') {
-      startBackgroundQueue(
-        'move',
-        tracks.map((t) => t.id),
-        0
-      );
+      await postBackendAction(backendUrl, '/api/mode/move', { config });
+      await checkAndLoadBackend(backendUrl, true);
       return;
     }
 
     if (nextModeAction.mode === 'rerun') {
-      const targetIds = pendingReRunTracks.map((t) => t.id);
       if (!journal.backupConfirmedAt) {
         setPendingModeAfterBackup('rerun');
         setBackupModalOpen(true);
         return;
       }
-      startBackgroundQueue('rerun', targetIds, 0);
+      await postBackendAction(backendUrl, '/api/mode/rerun', {
+        trackIds: pendingReRunTracks.map((t) => t.id),
+      });
+      await checkAndLoadBackend(backendUrl, true);
     }
   };
 
-  const handleConfirmBackupModal = () => {
-    const confirmedIso = new Date().toISOString();
-    setJournal((prev) => ({
-      ...prev,
-      backupConfirmedAt: confirmedIso,
-      lastFsyncIso: confirmedIso,
-    }));
+  const handleConfirmBackupModal = async () => {
     setBackupModalOpen(false);
     const modeToLaunch = pendingModeAfterBackup;
     setPendingModeAfterBackup(null);
 
-    if (modeToLaunch === 'tag') {
-      startBackgroundQueue(
-        'tag',
-        tracks.map((t) => t.id),
-        0
-      );
-    } else if (modeToLaunch === 'rerun') {
-      startBackgroundQueue(
-        'rerun',
-        pendingReRunTracks.map((t) => t.id),
-        0
-      );
+    if (!backendConnected) return;
+
+    const confirmRes = await postBackendAction<{ backupConfirmedAt?: string }>(
+      backendUrl,
+      '/api/backup/confirm',
+      { confirmed: true }
+    );
+    if (confirmRes?.backupConfirmedAt) {
+      setJournal((prev) => ({
+        ...prev,
+        backupConfirmedAt: confirmRes.backupConfirmedAt ?? new Date().toISOString(),
+      }));
     }
+
+    if (modeToLaunch === 'tag') {
+      await postBackendAction(backendUrl, '/api/mode/tag', { config });
+    } else if (modeToLaunch === 'rerun') {
+      await postBackendAction(backendUrl, '/api/mode/rerun', {
+        trackIds: pendingReRunTracks.map((t) => t.id),
+      });
+    }
+    await checkAndLoadBackend(backendUrl, true);
   };
 
   const handlePauseQueue = () => {
-    queuePausedRef.current = true;
+    pauseRef.current = true;
     setQueue((prev) => ({ ...prev, status: 'paused' }));
+    if (backendConnected) {
+      void postBackendAction(backendUrl, '/api/queue/pause');
+    }
   };
 
   const handleResumeQueue = () => {
-    queuePausedRef.current = false;
+    pauseRef.current = false;
     setQueue((prev) => ({ ...prev, status: 'running' }));
+    if (backendConnected) {
+      void postBackendAction(backendUrl, '/api/queue/resume');
+    }
   };
 
-  // Full atomic journal rollback (restores paths AND original tags!)
-  const handleRollbackJournal = () => {
-    clearQueueTimer();
-    setTracks((prev) =>
-      prev.map((t) => ({
-        ...t,
-        artist: t.originalTags.artist,
-        albumArtist: t.originalTags.albumArtist,
-        title: t.originalTags.title,
-        album: t.originalTags.album,
-        year: t.originalTags.year,
-        trackNumber: t.originalTags.trackNumber,
-        compilationFlag: t.originalTags.compilation,
-        status: mode1Completed ? 'analyzed' : 'pending',
-        taggedAt: null,
-        movedToPath: null,
-        skippedInMode2Reason: null,
-      }))
-    );
-    setCompanions((prev) => prev.map((c) => ({ ...c, moved: false })));
-    setMode2Completed(false);
-    setMode3Completed(false);
-    setJournal((prev) => ({
-      ...prev,
-      state: 'rolled_back',
-      lastFsyncIso: new Date().toISOString(),
-      entries: prev.entries.map((e) => ({ ...e, status: 'rolled_back' })),
-      removedEmptyDirs: [],
-    }));
-    setQueue(INITIAL_QUEUE);
-    showToast('Rollback erfolgreich — alle Dateipfade und Original-Tags wiederhergestellt.');
+  const handleRollbackJournal = async () => {
+    if (!backendConnected) return;
+    await postBackendAction(backendUrl, '/api/rollback');
+    await checkAndLoadBackend(backendUrl, true);
+    showToast('Rollback über FastAPI-Journal ausgeführt.');
   };
 
-  // Simulate an interrupted journal run to demonstrate Crash-Recovery
-  const handleSimulateCrashInterrupt = () => {
-    const sample = tracks.slice(0, 4);
-    const nowIso = new Date().toISOString();
-    setJournal((prev) => ({
-      ...prev,
-      runId: 'run-interrupted-demo',
-      mode: 'move',
-      state: 'interrupted',
-      backupConfirmedAt: prev.backupConfirmedAt ?? nowIso,
-      lastFsyncIso: nowIso,
-      entries: sample.map((t, i) => ({
-        id: `j-int-${t.id}`,
-        kind: 'move_track',
-        trackId: t.id,
-        fromPath: t.sourceRelativePath,
-        toPath: evaluation.trackPlans.get(t.id)?.targetRelativePath ?? t.sourceRelativePath,
-        originalTags: { ...t.originalTags },
-        status: i < 2 ? 'done' : 'pending',
-        timestampIso: nowIso,
-      })),
-    }));
-    showToast('Abgebrochenes Journal simuliert — Crash-Recovery-Banner ist aktiv.');
-  };
-
-  const handleResumeInterrupted = () => {
+  const handleResumeInterrupted = async () => {
     if (cache.interruptedAnalyzeCheckpoint !== null) {
-      const startAt = Math.min(cache.interruptedAnalyzeCheckpoint, tracks.length - 1);
-      setCache((prev) => ({ ...prev, interruptedAnalyzeCheckpoint: null }));
-      startBackgroundQueue(
-        'analyze',
-        tracks.map((t) => t.id),
-        startAt
-      );
+      if (backendConnected) {
+        await postBackendAction(backendUrl, '/api/mode/analyze', {
+          resumeFrom: cache.interruptedAnalyzeCheckpoint,
+        });
+        await checkAndLoadBackend(backendUrl, true);
+      } else {
+        void runLocalMode1Analysis(cache.interruptedAnalyzeCheckpoint);
+      }
       return;
     }
 
-    if (journal.state === 'interrupted') {
-      const remainingIds = journal.entries
-        .filter((e) => e.status === 'pending' && e.trackId)
-        .map((e) => e.trackId!);
-      setJournal((prev) => ({ ...prev, state: 'in_progress' }));
-      setMode1Completed(true);
-      setMode2Completed(true);
-      startBackgroundQueue('move', remainingIds.length > 0 ? remainingIds : tracks.map((t) => t.id), 0);
+    if (backendConnected && journal.state === 'interrupted') {
+      await postBackendAction(backendUrl, '/api/mode/move', { resume: true });
+      await checkAndLoadBackend(backendUrl, true);
     }
   };
 
@@ -740,9 +617,7 @@ export default function App() {
         };
       })
     );
-    showToast(
-      'Manuelle Zuordnung gespeichert — bereit für gezielten Re-Run (Modus 2 Taggen + Modus 3 Verschieben).'
-    );
+    showToast('Manuelle Zuordnung gespeichert — bereit für gezielten Re-Run (Modus 2 + Modus 3).');
   };
 
   // Artist & Duplicate override handlers
@@ -768,7 +643,7 @@ export default function App() {
       }
     }
     setArtistOverrides((prev) => ({ ...prev, decisions: next }));
-    showToast('Alle Fuzzy-Künstlervorschläge bestätigt — 0 offene Konflikte.');
+    showToast('Alle offenen Künstlervorschläge bestätigt.');
   };
 
   const handleSelectDuplicateOriginal = (groupId: string, trackId: string) => {
@@ -783,6 +658,22 @@ export default function App() {
       ...prev,
       decisions: { ...prev.decisions, [groupId]: decision },
     }));
+  };
+
+  const handleClearCache = async () => {
+    clearBrowserLookupCache();
+    if (backendConnected) {
+      await postBackendAction(backendUrl, '/api/cache/clear');
+    }
+    setCache((prev) => ({
+      ...prev,
+      fingerprintEntries: 0,
+      mbReleaseEntries: 0,
+      coverEntries: 0,
+      lyricsEntries: 0,
+      interruptedAnalyzeCheckpoint: null,
+    }));
+    showToast('Cache geleert.');
   };
 
   const selectedTrack = selectedTrackId
@@ -807,7 +698,7 @@ export default function App() {
           openArtistConflicts: evaluation.report.openArtistConflictCount,
           pendingReRun: pendingReRunTracks.length,
         }}
-        musicDir={config.hostMusicDir}
+        musicDir={activeSourceLabel || config.hostMusicDir}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
       />
@@ -816,7 +707,7 @@ export default function App() {
         <TopBar
           activeSection={activeSection}
           nextAction={nextModeAction}
-          onTriggerPrimaryAction={handleTriggerPrimaryAction}
+          onTriggerPrimaryAction={() => void handleTriggerPrimaryAction()}
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
         />
 
@@ -835,8 +726,18 @@ export default function App() {
               queue={queue}
               journal={journal}
               cache={cache}
+              backendConnected={backendConnected}
+              backendUrl={backendUrl}
+              backendChecking={backendChecking}
+              importingFiles={importingFiles}
+              importProgressLabel={importProgressLabel}
+              activeSourceLabel={activeSourceLabel}
               searchQuery={searchQuery}
               activeFilter={activeFilter}
+              onBackendUrlChange={setBackendUrl}
+              onCheckBackend={() => void checkAndLoadBackend(backendUrl, false)}
+              onImportLocalFiles={(files) => void handleImportLocalFiles(files)}
+              onClearLoadedLibrary={handleClearLoadedLibrary}
               onSearchChange={setSearchQuery}
               onFilterChange={setActiveFilter}
               onSelectTrack={setSelectedTrackId}
@@ -846,9 +747,8 @@ export default function App() {
               }
               onPauseQueue={handlePauseQueue}
               onResumeQueue={handleResumeQueue}
-              onResumeInterrupted={handleResumeInterrupted}
-              onRollbackJournal={handleRollbackJournal}
-              onSimulateCrashInterrupt={handleSimulateCrashInterrupt}
+              onResumeInterrupted={() => void handleResumeInterrupted()}
+              onRollbackJournal={() => void handleRollbackJournal()}
             />
           )}
 
@@ -884,28 +784,9 @@ export default function App() {
             <PipelineAndCacheView
               config={config}
               cache={cache}
+              backendConnected={backendConnected}
               onChangeConfig={(patch) => setConfig((prev) => ({ ...prev, ...patch }))}
-              onClearCache={() => {
-                setCache((prev) => ({
-                  ...prev,
-                  fingerprintEntries: 0,
-                  mbReleaseEntries: 0,
-                  coverEntries: 0,
-                  lyricsEntries: 0,
-                  interruptedAnalyzeCheckpoint: null,
-                }));
-                showToast('SQLite-Cache geleert.');
-              }}
-              onSimulateAnalyzeCheckpoint={() => {
-                setCache((prev) => ({
-                  ...prev,
-                  interruptedAnalyzeCheckpoint: 8,
-                  lastCheckpointIso: new Date().toISOString(),
-                }));
-                setMode1Completed(false);
-                setActiveSection('library');
-                showToast('Unterbrochener Analyse-Checkpoint #8 simuliert.');
-              }}
+              onClearCache={() => void handleClearCache()}
             />
           )}
 
@@ -940,7 +821,7 @@ export default function App() {
           setBackupModalOpen(false);
           setPendingModeAfterBackup(null);
         }}
-        onConfirm={handleConfirmBackupModal}
+        onConfirm={() => void handleConfirmBackupModal()}
       />
 
       {/* Subtle Toast Notification */}

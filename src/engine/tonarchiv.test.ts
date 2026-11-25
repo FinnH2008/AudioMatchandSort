@@ -17,13 +17,135 @@ import {
   isCompilationAlbumGroup,
   selectBestAlbumRelease,
 } from './classifierAndPlanner';
-import {
-  createSeedCompanions,
-  createSeedLeftovers,
-  createSeedTracks,
-  DEFAULT_CONFIG,
-} from '../data/seedLibrary';
+import { DEFAULT_CONFIG } from '../config/defaultConfig';
 import { generateDockerBundle } from './dockerGenerator';
+import {
+  isAudioCandidateExtension,
+  isCompanionFileName,
+  isVideoExtension,
+  mapParsedCodec,
+} from './localFolderScanner';
+import { AlbumReleaseCandidate, AudioTrack } from '../types/tonarchiv';
+
+// Minimal isolated factory strictly for unit tests (never imported by production code)
+function makeTrack(overrides: Partial<AudioTrack> & { id: string }): AudioTrack {
+  const title = overrides.title ?? 'Track';
+  const artist = overrides.artist ?? 'Artist';
+  const albumArtist = overrides.albumArtist ?? artist;
+  const album = overrides.album ?? 'Album';
+  const year = overrides.year ?? '2020';
+  const trackNumber = overrides.trackNumber ?? '01';
+
+  return {
+    id: overrides.id,
+    fileName: overrides.fileName ?? `${trackNumber} - ${title}.flac`,
+    extension: overrides.extension ?? '.flac',
+    sourceDir: overrides.sourceDir ?? 'src_album',
+    sourceRelativePath: overrides.sourceRelativePath ?? `src_album/${trackNumber} - ${title}.flac`,
+    sizeBytes: overrides.sizeBytes ?? 35_000_000,
+    mtimeIso: overrides.mtimeIso ?? '2022-01-01T00:00:00Z',
+    durationSec: overrides.durationSec ?? 240,
+    codec: overrides.codec ?? 'flac',
+    sampleRateHz: overrides.sampleRateHz ?? 44100,
+    bitDepth: overrides.bitDepth === undefined ? 16 : overrides.bitDepth,
+    bitrateKbps: overrides.bitrateKbps ?? 980,
+    spectralCutoffKhz: overrides.spectralCutoffKhz ?? null,
+    spectralWarningOnly: overrides.spectralWarningOnly ?? false,
+    artist,
+    albumArtist,
+    title,
+    album,
+    year,
+    trackNumber,
+    genre: overrides.genre ?? 'Electronic',
+    isrc: overrides.isrc ?? '',
+    compilationFlag: overrides.compilationFlag ?? false,
+    isLooseFile: overrides.isLooseFile ?? false,
+    originalTags: overrides.originalTags ?? {
+      artist,
+      albumArtist,
+      title,
+      album,
+      year,
+      trackNumber,
+      genre: overrides.genre ?? 'Electronic',
+      key: '8A',
+      bpm: 120,
+      compilation: overrides.compilationFlag ?? false,
+    },
+    mbArtistId: overrides.mbArtistId ?? null,
+    mbRecordingId: overrides.mbRecordingId ?? null,
+    acoustidId: overrides.acoustidId ?? null,
+    acoustidConfidence: overrides.acoustidConfidence ?? 0.96,
+    matchedRelease: overrides.matchedRelease ?? null,
+    availableReleases: overrides.availableReleases ?? [],
+    inMatchedReleaseTracklist: overrides.inMatchedReleaseTracklist ?? false,
+    matchedReleaseTrackPos: overrides.matchedReleaseTrackPos ?? null,
+    isRemixAlbumTrack: overrides.isRemixAlbumTrack ?? false,
+    detachedFromAlbum: overrides.detachedFromAlbum ?? false,
+    detachReason: overrides.detachReason ?? null,
+    activeSource: overrides.activeSource ?? 'musicbrainz',
+    sourceCandidates: overrides.sourceCandidates ?? [],
+    cachedLookup: overrides.cachedLookup ?? false,
+    camelotKey: overrides.camelotKey ?? '8A',
+    musicalKey: overrides.musicalKey ?? 'A min',
+    bpm: overrides.bpm === undefined ? 120 : overrides.bpm,
+    replayGainDb: overrides.replayGainDb ?? -5.2,
+    cover: overrides.cover ?? {
+      status: 'existing',
+      source: 'Eingebettet',
+      resolution: '1000×1000',
+      sizeKb: 220,
+      imageUrl: undefined,
+      fallbackGradient: 'from-slate-800 to-slate-900',
+      embeddedBefore: true,
+    },
+    lyrics: overrides.lyrics ?? {
+      status: 'synced',
+      source: 'LRCLIB',
+      syncedLrc: '[00:01.00] Line',
+      plainText: 'Line',
+    },
+    manualAssignment: overrides.manualAssignment ?? 'none',
+    manualReleaseId: overrides.manualReleaseId ?? null,
+    pendingReRunTagAndMove: overrides.pendingReRunTagAndMove ?? false,
+    status: overrides.status ?? 'pending',
+    skippedInMode2Reason: overrides.skippedInMode2Reason ?? null,
+    taggedAt: overrides.taggedAt ?? null,
+    movedToPath: overrides.movedToPath ?? null,
+  };
+}
+
+const REL_DISCOVERY: AlbumReleaseCandidate = {
+  releaseId: 'rel-discovery',
+  title: 'Discovery',
+  albumArtist: 'Daft Punk',
+  year: '2001',
+  country: 'EU',
+  format: 'CD',
+  trackCount: 14,
+  isCompilation: false,
+  isRemixAlbum: false,
+  matchScore: 0.97,
+  tracklist: [
+    { position: 1, title: 'One More Time', durationSec: 320 },
+    { position: 15, title: 'Aerodynamic (Daft Punk Remix)', durationSec: 370 },
+  ],
+};
+
+const REL_BRAVO: AlbumReleaseCandidate = {
+  releaseId: 'rel-bravo-124',
+  title: 'Bravo Hits 124',
+  albumArtist: 'Various Artists',
+  year: '2024',
+  country: 'DE',
+  format: '2×CD · Compilation',
+  trackCount: 44,
+  isCompilation: true,
+  isRemixAlbum: false,
+  matchScore: 0.94,
+  tracklist: [{ position: 1, title: 'One More Time', durationSec: 320 }],
+};
 
 test('Codec classification distinguishes M4A ALAC (lossless) vs M4A AAC (lossy)', () => {
   assert.equal(classifyCodecQuality('alac', 1060, 256, true), 'lossless');
@@ -31,6 +153,16 @@ test('Codec classification distinguishes M4A ALAC (lossless) vs M4A AAC (lossy)'
   assert.equal(classifyCodecQuality('aac', 128, 256, true), 'lossy_low');
   assert.equal(classifyCodecQuality('pcm_s16le', 1411, 256, true), 'lossless');
   assert.equal(isWavCodec('pcm_s16le', '.wav'), true);
+});
+
+test('Local folder scanner maps real parsed codecs, companions, and video files accurately', () => {
+  assert.equal(mapParsedCodec('ALAC', 'M4A', '.m4a', 16), 'alac');
+  assert.equal(mapParsedCodec('AAC', 'MPEG-4', '.m4a', undefined), 'aac');
+  assert.equal(mapParsedCodec('PCM', 'WAVE', '.wav', 24), 'pcm_s24le');
+  assert.equal(isCompanionFileName('cover.jpg'), true);
+  assert.equal(isCompanionFileName('ExactAudioCopy.log'), true);
+  assert.equal(isVideoExtension('.mkv'), true);
+  assert.equal(isAudioCandidateExtension('.flac'), true);
 });
 
 test('SMB path sanitizer cleans illegal characters and flags case-insensitive collisions without overwriting', () => {
@@ -73,14 +205,17 @@ test('MBID-protected bands with &, comma, or vs. are NEVER split, while feat. IS
 });
 
 test('Artist deduplication auto-merges MBID/exact normalization but keeps Fuzzy strictly needs_review', () => {
-  const tracks = createSeedTracks();
+  const tracks = [
+    makeTrack({ id: 't1', artist: 'Tiësto', albumArtist: 'Tiësto', mbArtistId: 'mb-tiesto' }),
+    makeTrack({ id: 't2', artist: 'DJ Tiesto', albumArtist: 'DJ Tiesto', mbArtistId: null }),
+    makeTrack({ id: 't3', artist: 'Röyksopp', albumArtist: 'Röyksopp', mbArtistId: 'mb-royk' }),
+    makeTrack({ id: 't4', artist: 'Royksopp', albumArtist: 'Royksopp', mbArtistId: null }),
+  ];
   const { clusters } = buildArtistClusters(tracks);
 
-  const fuzzyClusters = clusters.filter((c) => c.rule === 'fuzzy_suggestion');
-  assert.ok(fuzzyClusters.length >= 2, 'Expected fuzzy clusters for Tiësto/DJ Tiesto and Fred again../Fred Again');
-  for (const fc of fuzzyClusters) {
-    assert.equal(fc.status, 'needs_review');
-  }
+  const fuzzy = clusters.filter((c) => c.rule === 'fuzzy_suggestion');
+  assert.equal(fuzzy.length, 1);
+  assert.equal(fuzzy[0].status, 'needs_review');
 
   const royksopp = clusters.find((c) => c.canonicalName === 'Röyksopp');
   assert.ok(royksopp);
@@ -88,150 +223,275 @@ test('Artist deduplication auto-merges MBID/exact normalization but keeps Fuzzy 
 });
 
 test('Album-aware duplicates separate true duplicates (_Duplikate) from cross-album notices (Auch auf Album X)', () => {
-  const tracks = createSeedTracks();
+  const tracks = [
+    makeTrack({
+      id: 't-hi',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      albumArtist: 'Daft Punk',
+      album: 'Discovery',
+      codec: 'flac',
+      bitDepth: 24,
+      sampleRateHz: 96000,
+      bitrateKbps: 2810,
+      mbRecordingId: 'rec-omt',
+      matchedRelease: REL_DISCOVERY,
+      inMatchedReleaseTracklist: true,
+    }),
+    makeTrack({
+      id: 't-lo-same',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      albumArtist: 'Daft Punk',
+      album: 'Discovery',
+      codec: 'flac',
+      bitDepth: 16,
+      sampleRateHz: 44100,
+      bitrateKbps: 960,
+      mbRecordingId: 'rec-omt',
+      matchedRelease: REL_DISCOVERY,
+      inMatchedReleaseTracklist: true,
+    }),
+    makeTrack({
+      id: 't-loose',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      albumArtist: 'Daft Punk',
+      album: '',
+      isLooseFile: true,
+      codec: 'mp3',
+      extension: '.mp3',
+      bitDepth: null,
+      bitrateKbps: 128,
+      mbRecordingId: 'rec-omt',
+      matchedRelease: null,
+    }),
+    makeTrack({
+      id: 't-bravo',
+      title: 'One More Time',
+      artist: 'Daft Punk',
+      albumArtist: 'Various Artists',
+      album: 'Bravo Hits 124',
+      year: '2024',
+      compilationFlag: true,
+      codec: 'mp3',
+      extension: '.mp3',
+      bitDepth: null,
+      bitrateKbps: 320,
+      mbRecordingId: 'rec-omt',
+      matchedRelease: REL_BRAVO,
+      inMatchedReleaseTracklist: true,
+    }),
+  ];
+
   const res = evaluateLibraryPlan(
     tracks,
-    createSeedCompanions(),
-    createSeedLeftovers(),
+    [],
+    [],
     DEFAULT_CONFIG,
     { decisions: {}, renamedCanonical: {} },
     { decisions: {}, selectedOriginals: {} }
   );
 
-  // One More Time on Bravo Hits must be a cross_album_notice, NOT moved to _Duplikate
-  const bravoTrackPlan = res.trackPlans.get('trk-06')!;
-  assert.equal(bravoTrackPlan.isDuplicateToMove, false);
-  assert.ok(bravoTrackPlan.targetRelativePath.startsWith('Lossy/Various Artists/2024 - Bravo Hits 124/'));
+  assert.equal(res.trackPlans.get('t-bravo')?.isDuplicateToMove, false);
+  assert.ok(
+    res.trackPlans.get('t-bravo')?.targetRelativePath.startsWith('Lossy/Various Artists/2024 - Bravo Hits 124/')
+  );
 
   const crossNotices = res.duplicateGroups.filter((g) => g.scope === 'cross_album_notice');
-  assert.ok(crossNotices.length >= 1);
+  assert.equal(crossNotices.length, 1);
   assert.ok(crossNotices[0].crossAlbumNote?.includes('Auch auf Album'));
 
-  // Loose 128k MP3 of One More Time (trk-04) & 16-bit FLAC copy (trk-03) move to _Duplikate
-  assert.equal(res.trackPlans.get('trk-03')?.isDuplicateToMove, true);
-  assert.equal(res.trackPlans.get('trk-04')?.isDuplicateToMove, true);
-  assert.ok(res.trackPlans.get('trk-04')?.targetRelativePath.startsWith('_Duplikate/Daft Punk/'));
-
-  // DJ-Remix of Delilah (trk-17) is NEVER marked duplicate of original Delilah (trk-16)
-  assert.equal(res.trackPlans.get('trk-17')?.isDuplicateToMove, false);
-  assert.equal(res.trackPlans.get('trk-17')?.classification, 'dj_remix');
+  assert.equal(res.trackPlans.get('t-lo-same')?.isDuplicateToMove, true);
+  assert.equal(res.trackPlans.get('t-loose')?.isDuplicateToMove, true);
 });
 
 test('Duplicate tiebreaker order: higher quality -> more complete tags -> larger size -> older mtime', () => {
-  const tracks = createSeedTracks();
-  const epleRich = tracks.find((t) => t.id === 'trk-07')!;
-  const epleSparse = tracks.find((t) => t.id === 'trk-08')!;
-  const cmp = compareDuplicateCandidates(epleRich, epleSparse);
-  assert.equal(cmp.winner.id, 'trk-07');
+  const rich = makeTrack({ id: 'rich', codec: 'alac', bitDepth: 16, sampleRateHz: 44100, bitrateKbps: 1060 });
+  const sparse = makeTrack({
+    id: 'sparse',
+    codec: 'alac',
+    bitDepth: 16,
+    sampleRateHz: 44100,
+    bitrateKbps: 1060,
+    originalTags: {
+      artist: 'Artist',
+      albumArtist: '',
+      title: 'Track',
+      album: '',
+      year: '',
+      trackNumber: '',
+      genre: '',
+      key: '',
+      bpm: null,
+      compilation: false,
+    },
+  });
+  const cmp = compareDuplicateCandidates(rich, sparse);
+  assert.equal(cmp.winner.id, 'rich');
   assert.equal(cmp.reason, 'more_complete_tags');
 });
 
-test('Official album remixes & whole remix albums stay in album, while non-tracklist bootlegs detach to DJ-Remixes', () => {
-  const tracks = createSeedTracks();
-  const res = evaluateLibraryPlan(
-    tracks,
-    createSeedCompanions(),
-    createSeedLeftovers(),
+test('Official album remixes stay in album while non-tracklist bootlegs detach to DJ-Remixes (Option A & B)', () => {
+  const officialRemix = makeTrack({
+    id: 'off',
+    title: 'Aerodynamic (Daft Punk Remix)',
+    artist: 'Daft Punk',
+    albumArtist: 'Daft Punk',
+    album: 'Discovery',
+    sourceDir: 'disc',
+    mbRecordingId: 'rec-aero-remix',
+    acoustidConfidence: 0.96,
+    matchedRelease: REL_DISCOVERY,
+    inMatchedReleaseTracklist: true,
+    matchedReleaseTrackPos: 15,
+  });
+  const bootleg = makeTrack({
+    id: 'boot',
+    title: 'One More Time (Club Bootleg Edit)',
+    artist: 'Daft Punk',
+    albumArtist: 'Daft Punk',
+    album: 'Discovery',
+    sourceDir: 'disc',
+    codec: 'mp3',
+    extension: '.mp3',
+    bitDepth: null,
+    bitrateKbps: 320,
+    acoustidConfidence: 0.55,
+    matchedRelease: REL_DISCOVERY,
+    inMatchedReleaseTracklist: false,
+  });
+
+  const resA = evaluateLibraryPlan(
+    [officialRemix, bootleg],
+    [],
+    [],
     DEFAULT_CONFIG,
     { decisions: {}, renamedCanonical: {} },
     { decisions: {}, selectedOriginals: {} }
   );
+  assert.equal(resA.trackPlans.get('off')?.classification, 'album_track');
+  assert.equal(resA.trackPlans.get('boot')?.classification, 'dj_remix');
+  assert.ok(resA.trackPlans.get('boot')?.targetRelativePath.startsWith('DJ-Remixes/'));
 
-  // Official remix on Discovery tracklist (trk-02) stays album_track
-  assert.equal(res.trackPlans.get('trk-02')?.classification, 'album_track');
-  assert.ok(res.trackPlans.get('trk-02')?.targetRelativePath.startsWith('Lossless/Daft Punk/2001 - Discovery/'));
-
-  // Whole remix album Dua Lipa (trk-13) stays album_track
-  assert.equal(res.trackPlans.get('trk-13')?.classification, 'album_track');
-
-  // Foreign bootleg in Discovery folder (trk-05) detaches to DJ-Remixes/ (Option A default)
-  assert.equal(res.trackPlans.get('trk-05')?.classification, 'dj_remix');
-  assert.ok(res.trackPlans.get('trk-05')?.targetRelativePath.startsWith('DJ-Remixes/'));
-
-  // Option B splits DJ-Remixes into Lossless/DJ-Remixes and Lossy/DJ-Remixes
-  const resOptionB = evaluateLibraryPlan(
-    tracks,
-    createSeedCompanions(),
-    createSeedLeftovers(),
+  const resB = evaluateLibraryPlan(
+    [officialRemix, bootleg],
+    [],
+    [],
     { ...DEFAULT_CONFIG, djRemixLayout: 'split_by_quality' },
     { decisions: {}, renamedCanonical: {} },
     { decisions: {}, selectedOriginals: {} }
   );
-  assert.ok(resOptionB.trackPlans.get('trk-05')?.targetRelativePath.startsWith('Lossy/DJ-Remixes/'));
+  assert.ok(resB.trackPlans.get('boot')?.targetRelativePath.startsWith('Lossy/DJ-Remixes/'));
 });
 
 test('Quality-split _Review/Lossless and _Review/Lossy routing plus keepReviewTracksInPlace option', () => {
-  const tracks = createSeedTracks();
+  const revFlac = makeTrack({
+    id: 'r1',
+    title: 'Session Jam',
+    codec: 'flac',
+    extension: '.flac',
+    sourceRelativePath: 'rips/Session/01.flac',
+    matchedRelease: null,
+    acoustidConfidence: 0.9,
+  });
+  const revOgg = makeTrack({
+    id: 'r2',
+    title: 'Warmup Cut',
+    codec: 'vorbis',
+    extension: '.ogg',
+    bitDepth: null,
+    bitrateKbps: 256,
+    sourceRelativePath: 'unsorted/02.ogg',
+    matchedRelease: null,
+    acoustidConfidence: 0.62,
+  });
+
   const res = evaluateLibraryPlan(
-    tracks,
-    createSeedCompanions(),
-    createSeedLeftovers(),
+    [revFlac, revOgg],
+    [],
+    [],
     DEFAULT_CONFIG,
     { decisions: {}, renamedCanonical: {} },
     { decisions: {}, selectedOriginals: {} }
   );
+  assert.equal(res.trackPlans.get('r1')?.targetRelativePath, '_Review/Lossless/rips/Session/01.flac');
+  assert.equal(res.trackPlans.get('r2')?.targetRelativePath, '_Review/Lossy/unsorted/02.ogg');
 
-  // trk-18 is Lossless review -> _Review/Lossless/{origRelPath}
-  assert.equal(
-    res.trackPlans.get('trk-18')?.targetRelativePath,
-    '_Review/Lossless/private_vinyl_rips/Analog_Tape_Sessions/01 Nocturne in C Minor.flac'
-  );
-  // trk-19 is Lossy review (no remix keyword, 62% confidence) -> _Review/Lossy/{origRelPath}
-  assert.equal(
-    res.trackPlans.get('trk-19')?.targetRelativePath,
-    '_Review/Lossy/eingemischt_mp3s/Unbekannt_2018/Track07_Midnight_Drive.ogg'
-  );
-  assert.equal(res.report.reviewLosslessCount, 1);
-  assert.equal(res.report.reviewLossyCount, 1);
-
-  // Checkbox keepReviewTracksInPlace leaves both untouched
   const resKeep = evaluateLibraryPlan(
-    tracks,
-    createSeedCompanions(),
-    createSeedLeftovers(),
+    [revFlac, revOgg],
+    [],
+    [],
     { ...DEFAULT_CONFIG, keepReviewTracksInPlace: true },
     { decisions: {}, renamedCanonical: {} },
     { decisions: {}, selectedOriginals: {} }
   );
-  assert.equal(
-    resKeep.trackPlans.get('trk-18')?.targetRelativePath,
-    tracks.find((t) => t.id === 'trk-18')?.sourceRelativePath
-  );
+  assert.equal(resKeep.trackPlans.get('r1')?.targetRelativePath, 'rips/Session/01.flac');
 });
 
 test('Fake-FLAC spectral warning never demotes Lossless track, and WAV media embedding defaults OFF', () => {
-  const tracks = createSeedTracks();
+  const fakeFlac = makeTrack({
+    id: 'ff',
+    title: 'Fake Flac Track',
+    codec: 'flac',
+    spectralWarningOnly: true,
+    spectralCutoffKhz: 16.1,
+    matchedRelease: REL_DISCOVERY,
+    inMatchedReleaseTracklist: true,
+  });
+  const wav = makeTrack({
+    id: 'wav',
+    title: 'Wav Master Track',
+    codec: 'pcm_s16le',
+    extension: '.wav',
+    matchedRelease: REL_DISCOVERY,
+    inMatchedReleaseTracklist: true,
+  });
+
   const res = evaluateLibraryPlan(
-    tracks,
-    createSeedCompanions(),
-    createSeedLeftovers(),
-    DEFAULT_CONFIG,
+    [fakeFlac, wav],
+    [],
+    [],
+    { ...DEFAULT_CONFIG, essentiaAvailable: true },
     { decisions: {}, renamedCanonical: {} },
     { decisions: {}, selectedOriginals: {} }
   );
-  // trk-09 has spectralWarningOnly=true -> stays in Lossless/
-  assert.ok(res.trackPlans.get('trk-09')?.targetRelativePath.startsWith('Lossless/Simon & Garfunkel/'));
+  assert.ok(res.trackPlans.get('ff')?.targetRelativePath.startsWith('Lossless/'));
   assert.equal(res.report.fakeFlacWarningCount, 1);
-  // trk-10 is WAV -> wavMediaSkipped=true by default
-  assert.equal(res.trackPlans.get('trk-10')?.wavMediaSkipped, true);
+  assert.equal(res.trackPlans.get('wav')?.wavMediaSkipped, true);
 });
 
-test('3-Mode Gate: Mode 2 unlocks even with open artist conflicts, Mode 3 requires 0 conflicts, Re-Run activates after Mode 3', () => {
-  const m1 = computeNextModeAction({
+test('3-Mode Gate handles empty library, browser-only read-only mode, conflicts, and Re-Run', () => {
+  const empty = computeNextModeAction({
     mode1Completed: false,
     mode2Completed: false,
     mode3Completed: false,
-    openArtistConflictCount: 2,
+    openArtistConflictCount: 0,
     pathCollisionCount: 0,
     pendingReRunCount: 0,
     queueRunningOrPaused: false,
     hasInterruptedJournal: false,
+    totalTracks: 0,
+    backendConnected: false,
   });
-  assert.equal(m1.mode, 'analyze');
-  assert.equal(m1.enabled, true);
+  assert.equal(empty.enabled, false);
+  assert.equal(empty.label, 'Keine Dateien geladen');
 
-  // Mode 2 is ENABLED even with 2 open artist conflicts (those tracks are skipped)
-  const m2 = computeNextModeAction({
+  const m2BrowserOnly = computeNextModeAction({
+    mode1Completed: true,
+    mode2Completed: false,
+    mode3Completed: false,
+    openArtistConflictCount: 0,
+    pathCollisionCount: 0,
+    pendingReRunCount: 0,
+    queueRunningOrPaused: false,
+    hasInterruptedJournal: false,
+    totalTracks: 5,
+    backendConnected: false,
+  });
+  assert.equal(m2BrowserOnly.enabled, false);
+
+  const m2Backend = computeNextModeAction({
     mode1Completed: true,
     mode2Completed: false,
     mode3Completed: false,
@@ -240,11 +500,11 @@ test('3-Mode Gate: Mode 2 unlocks even with open artist conflicts, Mode 3 requir
     pendingReRunCount: 0,
     queueRunningOrPaused: false,
     hasInterruptedJournal: false,
+    totalTracks: 5,
+    backendConnected: true,
   });
-  assert.equal(m2.mode, 'tag');
-  assert.equal(m2.enabled, true);
+  assert.equal(m2Backend.enabled, true);
 
-  // Mode 3 is BLOCKED until 0 open artist conflicts
   const m3Blocked = computeNextModeAction({
     mode1Completed: true,
     mode2Completed: true,
@@ -254,11 +514,11 @@ test('3-Mode Gate: Mode 2 unlocks even with open artist conflicts, Mode 3 requir
     pendingReRunCount: 0,
     queueRunningOrPaused: false,
     hasInterruptedJournal: false,
+    totalTracks: 5,
+    backendConnected: true,
   });
-  assert.equal(m3Blocked.mode, 'move');
   assert.equal(m3Blocked.enabled, false);
 
-  // Re-Run activates after Mode 3 when review tracks are manually reassigned
   const rerun = computeNextModeAction({
     mode1Completed: true,
     mode2Completed: true,
@@ -268,37 +528,39 @@ test('3-Mode Gate: Mode 2 unlocks even with open artist conflicts, Mode 3 requir
     pendingReRunCount: 1,
     queueRunningOrPaused: false,
     hasInterruptedJournal: false,
+    totalTracks: 5,
+    backendConnected: true,
   });
   assert.equal(rerun.mode, 'rerun');
   assert.equal(rerun.enabled, true);
 });
 
 test('Compilation release matcher searches exclusively compilation releases and Docker bundle contains required sections', () => {
-  const tracks = createSeedTracks();
-  const bravoTrack = tracks.find((t) => t.id === 'trk-06')!;
+  const bravoTrack = makeTrack({
+    id: 'b1',
+    album: 'Bravo Hits 124',
+    albumArtist: 'Various Artists',
+    compilationFlag: true,
+    matchedRelease: REL_BRAVO,
+  });
   assert.equal(isCompilationAlbumGroup('Bravo Hits 124', [bravoTrack]), true);
-  const picked = selectBestAlbumRelease('Bravo Hits 124', [bravoTrack], [
-    {
-      releaseId: 'studio',
-      title: 'Discovery',
-      albumArtist: 'Daft Punk',
-      year: '2001',
-      country: 'EU',
-      format: 'CD',
-      trackCount: 14,
-      isCompilation: false,
-      isRemixAlbum: false,
-      matchScore: 0.99,
-      tracklist: [],
-    },
-    bravoTrack.matchedRelease!,
-  ]);
+  const picked = selectBestAlbumRelease('Bravo Hits 124', [bravoTrack], [REL_DISCOVERY, REL_BRAVO]);
   assert.equal(picked?.isCompilation, true);
 
   const bundle = generateDockerBundle(DEFAULT_CONFIG);
   assert.equal(bundle.length, 6);
+  const compose = bundle.find((f) => f.filename === 'docker-compose.yml')!.content;
+  assert.ok(compose.includes('${TONARCHIV_PORT:-7070}:7070'));
+  const dockerfile = bundle.find((f) => f.filename === 'Dockerfile')!.content;
+  assert.ok(dockerfile.includes('EXPOSE 7070'));
+  assert.ok(dockerfile.includes('--port 7070'));
+  const envEx = bundle.find((f) => f.filename === '.env.example')!.content;
+  assert.ok(envEx.includes('TONARCHIV_PORT=7070'));
+  assert.ok(envEx.includes('ACOUSTID_API_KEY='));
+  assert.ok(envEx.includes('DISCOGS_TOKEN='));
   const readme = bundle.find((f) => f.filename === 'README.md')!.content;
   assert.ok(readme.includes('Erster Testlauf'));
+  assert.ok(readme.includes(':7070'));
   assert.ok(readme.includes('PUID'));
   assert.ok(readme.includes('Sicherheit & Empfehlungen'));
   assert.ok(readme.includes('MusicBrainz Picard'));

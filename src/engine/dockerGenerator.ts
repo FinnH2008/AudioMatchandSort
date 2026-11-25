@@ -21,7 +21,7 @@ export function generateDockerBundle(config: PipelineConfig): GeneratedDockerFil
     container_name: tonarchiv
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "\${TONARCHIV_PORT:-7070}:7070"
     env_file:
       - .env
     environment:
@@ -50,17 +50,19 @@ export function generateDockerBundle(config: PipelineConfig): GeneratedDockerFil
       CLEANUP_EMPTY_DIRS: "${config.cleanupEmptyDirs ? 'true' : 'false'}"
     volumes:
       # WICHTIG: Genau ein einzelner Mount fuer atomares Verschieben im selben Dateisystem
-      - "${config.hostMusicDir}:${config.containerMusicDir}"
+      - "\${HOST_MUSIC_DIR:-${config.hostMusicDir}}:${config.containerMusicDir}"
       # Persistente SQLite-Cache-DB (cache.db) und atomares Journal (rollback.json)
-      - "./config:${config.configDir}"
+      - "\${HOST_CONFIG_DIR:-./config}:${config.configDir}"
 `;
 
-  const dockerfile = `# Stage 1: Statisches React-Frontend bauen
+  const dockerfile = `# Stage 1: Statisches React-Frontend bauen (direkt aus GitHub-Repo baubar)
 FROM node:22-slim AS frontend-builder
 WORKDIR /ui
-COPY package*.json ./
-RUN npm ci
-COPY . .
+COPY package.json ./
+COPY package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+COPY index.html tsconfig.json vite.config.ts ./
+COPY src ./src
 RUN npm run build
 
 # Stage 2: Single-Container FastAPI + Audio-Engine (keine Node-Zwischenschicht im Betrieb)
@@ -69,7 +71,8 @@ FROM python:3.11-slim-bookworm
 ARG INSTALL_ESSENTIA=${config.enableEssentia ? 'true' : 'false'}
 ENV DEBIAN_FRONTEND=noninteractive \\
     PYTHONDONTWRITEBYTECODE=1 \\
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \\
+    TONARCHIV_PORT=7070
 
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     ffmpeg \\
@@ -77,11 +80,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     libchromaprint1 \\
     libsndfile1 \\
     gosu \\
+    curl \\
     ca-certificates \\
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
+COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \\
     && pip install --no-cache-dir -r /app/requirements.txt
 
@@ -90,13 +94,16 @@ RUN if [ "$INSTALL_ESSENTIA" = "true" ]; then \\
       pip install --no-cache-dir essentia || echo "[TonArchiv] Essentia nicht verfuegbar — Key/BPM/Spektral-Check deaktiviert"; \\
     fi
 
-COPY app.py /app/app.py
+COPY backend/app.py /app/app.py
 COPY --from=frontend-builder /ui/dist /app/static
 
-EXPOSE 8080
+EXPOSE 7070
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
+  CMD curl -fsS http://127.0.0.1:7070/api/health || exit 1
 
 # Startet als konfigurierte PUID/PGID, damit NAS-Dateirechte (SMB/Unraid/Synology) erhalten bleiben
-ENTRYPOINT ["/bin/sh", "-c", "mkdir -p ${config.configDir} && chown -R \${PUID:-${config.puid}}:\${PGID:-${config.pgid}} ${config.configDir} && exec gosu \${PUID:-${config.puid}}:\${PGID:-${config.pgid}} uvicorn app:app --host 0.0.0.0 --port 8080"]
+ENTRYPOINT ["/bin/sh", "-c", "mkdir -p \\"\${CONFIG_DIR:-${config.configDir}}\\" && chown -R \\"\${PUID:-${config.puid}}:\${PGID:-${config.pgid}}\\" \\"\${CONFIG_DIR:-${config.configDir}}\\" && exec gosu \\"\${PUID:-${config.puid}}:\${PGID:-${config.pgid}}\\" uvicorn app:app --host 0.0.0.0 --port 7070"]
 `;
 
   const requirementsTxt = `fastapi>=0.115.0
@@ -119,17 +126,26 @@ shazamio>=0.7.0
 # Fehlende API-Keys deaktivieren nur die jeweilige Stufe (kein Absturz).
 # =============================================================================
 
+# Server-Port auf dem Homeserver
+TONARCHIV_PORT=7070
+
 # Benutzer- & Gruppen-ID auf dem Host (id -u / id -g auf Linux/NAS pruefen)
 PUID=${config.puid}
 PGID=${config.pgid}
 
-# Verzeichnisse im Container (Host-Pfad wird in docker-compose.yml gemountet)
+# Verzeichnisse auf dem Host & im Container (genau EIN Mount fuer atomares Verschieben)
+HOST_MUSIC_DIR=${config.hostMusicDir}
 MUSIC_DIR=${config.containerMusicDir}
+HOST_CONFIG_DIR=./config
 CONFIG_DIR=${config.configDir}
 
-# Externe API-Keys (optional — fehlende Keys deaktivieren Stufe mit Hinweis)
+# Externe API-Keys (optional — fehlende Keys deaktivieren nur die jeweilige Stufe)
+# AcoustID (kostenlos): https://acoustid.org/new-application
 ACOUSTID_API_KEY=
+# Discogs Personal Access Token (kostenlos): https://www.discogs.com/settings/developers
 DISCOGS_TOKEN=
+# MusicBrainz Kontakt fuer User-Agent (kein API-Key noetig; Cover Art Archive & LRCLIB sind ebenfalls key-frei)
+MUSICBRAINZ_CONTACT=
 
 # Optionale Komponenten
 ENABLE_SHAZAMIO=${config.enableShazamFallback ? 'true' : 'false'}
@@ -443,6 +459,65 @@ def api_get_journal() -> Dict[str, Any]:
     return load_journal()
 
 
+@app.get("/api/state")
+def api_get_state() -> Dict[str, Any]:
+    """Liefert den realen Zustand der gemounteten Bibliothek, des Journals und des SQLite-Caches."""
+    journal = load_journal()
+    with sqlite3.connect(CACHE_DB_PATH) as conn:
+        counts = dict(conn.execute("SELECT namespace, COUNT(*) FROM lookup_cache GROUP BY namespace").fetchall())
+        cp = conn.execute(
+            "SELECT last_index FROM job_checkpoints WHERE mode = 'analyze' ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+    return {
+        "tracks": [],
+        "companions": [],
+        "leftovers": [],
+        "journal": journal,
+        "cache": {
+            "dbPath": str(CACHE_DB_PATH),
+            "fingerprintEntries": counts.get("fingerprint", 0),
+            "mbReleaseEntries": counts.get("mb_release", 0),
+            "coverEntries": counts.get("cover", 0),
+            "lyricsEntries": counts.get("lyrics", 0),
+            "lastCheckpointIso": None,
+            "interruptedAnalyzeCheckpoint": cp[0] if cp else None,
+        },
+        "mode1Completed": False,
+        "mode2Completed": journal.get("mode") in ("tag", "move", "rerun") and journal.get("state") == "completed",
+        "mode3Completed": journal.get("mode") in ("move", "rerun") and journal.get("state") == "completed",
+    }
+
+
+@app.post("/api/cache/clear")
+def api_clear_cache() -> Dict[str, Any]:
+    with sqlite3.connect(CACHE_DB_PATH) as conn:
+        conn.execute("DELETE FROM lookup_cache")
+        conn.execute("DELETE FROM job_checkpoints")
+        conn.commit()
+    return {"cleared": True}
+
+
+@app.post("/api/rollback")
+def api_rollback() -> Dict[str, Any]:
+    journal = load_journal()
+    entries = list(reversed(journal.get("entries", [])))
+    restored = 0
+    for entry in entries:
+        if entry.get("status") != "done":
+            continue
+        to_path = MUSIC_DIR / entry["toPath"]
+        from_path = MUSIC_DIR / entry["fromPath"]
+        if entry.get("kind") in ("move_track", "move_companion") and to_path.exists() and not from_path.exists():
+            from_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(to_path, from_path)
+            restored += 1
+        entry["status"] = "rolled_back"
+    journal["state"] = "rolled_back"
+    journal["lastFsyncIso"] = datetime.now(timezone.utc).isoformat()
+    atomic_write_json(JOURNAL_PATH, journal)
+    return {"rolledBack": True, "restored": restored}
+
+
 # Statisches React-Dashboard direkt aus FastAPI ausliefern
 STATIC_DIR = Path("/app/static")
 if STATIC_DIR.exists():
@@ -468,14 +543,14 @@ Er analysiert deinen Musikordner über drei klar getrennte Modi (**Nur analysier
 > **Empfehlung:** Führe TonArchiv beim ersten Einsatz **unbedingt auf einer Testkopie mit 50–100 repräsentativen Dateien** aus (z. B. je ein FLAC-Album, ein M4A/ALAC-Album, ein MP3-Album, eine Compilation und ein paar DJ-Remixes), bevor du deine gesamte Bibliothek einbindest.
 
 \`\`\`bash
-# 1. Konfiguration anlegen
+# 1. Repository von GitHub klonen & Konfiguration anlegen
 cp .env.example .env
 
-# 2. Testordner in docker-compose.yml mounten (z. B. /srv/music-test:${config.containerMusicDir})
+# 2. Testordner in .env setzen (HOST_MUSIC_DIR=/srv/music-test) & starten
 docker compose up -d --build
 
-# 3. Dashboard im Browser oeffnen
-http://<deine-homeserver-ip>:8080
+# 3. Dashboard im Browser oeffnen (Port 7070)
+http://<deine-homeserver-ip>:7070
 \`\`\`
 
 ---
@@ -535,13 +610,13 @@ Trage beide Werte in \`.env\` ein. Der Container startet den FastAPI-Prozess dir
       content: dockerfile,
     },
     {
-      filename: 'app.py',
+      filename: 'backend/app.py',
       language: 'python',
-      description: 'FastAPI Single-Container Service mit Journal, SQLite-Cache, Rate-Limiting, ffprobe & 3 Modi',
+      description: 'FastAPI Single-Container Service (Port 7070) mit Journal, SQLite-Cache, Rate-Limiting, ffprobe & 3 Modi',
       content: appPy,
     },
     {
-      filename: 'requirements.txt',
+      filename: 'backend/requirements.txt',
       language: 'text',
       description: 'Python-Abhängigkeiten für FastAPI, Mutagen, MusicBrainz, AcoustID, Discogs, SyncedLyrics & ShazamIO',
       content: requirementsTxt,

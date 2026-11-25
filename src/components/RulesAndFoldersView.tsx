@@ -370,24 +370,34 @@ export function RulesAndFoldersView({
         </div>
 
         <div className="p-4 bg-[#0F172A] max-h-[620px] overflow-y-auto font-mono text-[11px] leading-relaxed space-y-1">
-          {sortedPaths.map((p) => {
-            const colorClass = p.startsWith('Lossless/')
-              ? 'text-emerald-300'
-              : p.startsWith('DJ-Remixes/') || p.includes('/DJ-Remixes/')
-                ? 'text-sky-300'
-                : p.startsWith('_Duplikate/')
-                  ? 'text-amber-300'
-                  : p.startsWith('_Review/')
-                    ? 'text-amber-200'
-                    : p.startsWith('Lossy/Low-Quality/')
-                      ? 'text-red-300'
-                      : 'text-slate-300';
-            return (
-              <div key={p} className={`${colorClass} truncate`} title={p}>
-                /{p}
-              </div>
-            );
-          })}
+          {sortedPaths.length === 0 ? (
+            <div className="py-10 text-center font-sans text-xs text-slate-400 space-y-1.5">
+              <p className="text-slate-300">Noch keine Audiodateien geladen.</p>
+              <p>
+                Lies unter „Bibliothek“ deinen lokalen Musikordner ein oder verbinde das
+                TonArchiv Docker-Backend, um die realen Zielpfade zu sehen.
+              </p>
+            </div>
+          ) : (
+            sortedPaths.map((p) => {
+              const colorClass = p.startsWith('Lossless/')
+                ? 'text-emerald-300'
+                : p.startsWith('DJ-Remixes/') || p.includes('/DJ-Remixes/')
+                  ? 'text-sky-300'
+                  : p.startsWith('_Duplikate/')
+                    ? 'text-amber-300'
+                    : p.startsWith('_Review/')
+                      ? 'text-amber-200'
+                      : p.startsWith('Lossy/Low-Quality/')
+                        ? 'text-red-300'
+                        : 'text-slate-300';
+              return (
+                <div key={p} className={`${colorClass} truncate`} title={p}>
+                  /{p}
+                </div>
+              );
+            })
+          )}
         </div>
 
         <div className="px-5 py-3.5 border-t border-[#243044] text-xs text-slate-400 flex items-start gap-2">

@@ -1,0 +1,16 @@
+node_modules
+dist
+build
+config
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.aistudio
+.playwright-cli
+*.log
+.DS_Store
+__pycache__
+*.pyc
+*.pyo
