@@ -77,6 +77,8 @@ interface LibraryViewProps {
   onResumeInterrupted: () => void;
   onRollbackJournal: () => void;
   onRetryFailedLookups: (options?: { trackIds?: string[]; includeUnmatched?: boolean }) => void;
+  onRescanBackend: () => void;
+  onCleanupEmptyDirs: () => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -123,6 +125,8 @@ export function LibraryView({
   onResumeInterrupted,
   onRollbackJournal,
   onRetryFailedLookups,
+  onRescanBackend,
+  onCleanupEmptyDirs,
 }: LibraryViewProps) {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const filesInputRef = useRef<HTMLInputElement | null>(null);
@@ -931,23 +935,46 @@ export function LibraryView({
                     <span>Ohne Treffer erneut abrufen ({unmatchedTracks.length})</span>
                   </button>
                 )}
-              <button
-                type="button"
-                onClick={() => folderInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-200 hover:border-sky-400 whitespace-nowrap"
-              >
-                <FolderOpen className="h-3.5 w-3.5" />
-                <span>Ordner wechseln</span>
-              </button>
-              {!backendConnected && (
-                <button
-                  type="button"
-                  onClick={onClearLoadedLibrary}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-400 hover:text-red-300 hover:border-red-400/50 whitespace-nowrap"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  <span>Leeren</span>
-                </button>
+              {backendConnected ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={onCleanupEmptyDirs}
+                    disabled={queue.status === 'running' || queue.status === 'paused'}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-200 hover:border-sky-400 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Leere Alt-Ordner aufräumen</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onRescanBackend}
+                    disabled={queue.status === 'running' || queue.status === 'paused'}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-200 hover:border-sky-400 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <span>Ordner neu scannen</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => folderInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-200 hover:border-sky-400 whitespace-nowrap"
+                  >
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    <span>Ordner wechseln</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onClearLoadedLibrary}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-400 hover:text-red-300 hover:border-red-400/50 whitespace-nowrap"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Leeren</span>
+                  </button>
+                </>
               )}
             </div>
           </div>

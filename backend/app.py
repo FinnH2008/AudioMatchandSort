@@ -1744,6 +1744,29 @@ def write_tags_to_audio_file(
     return {"tagged": True}
 
 
+_OS_JUNK_NAMES = {".ds_store", "thumbs.db", "desktop.ini", ".picasa.ini"}
+_TARGET_ROOT_DIRS = {"lossless", "lossy", "_duplikate", "_review", "dj-remixes"}
+
+
+def _clean_os_junk_in_dir(dir_path: Path) -> None:
+    try:
+        for child in list(dir_path.iterdir()):
+            name_low = child.name.lower()
+            if child.is_file() and (name_low in _OS_JUNK_NAMES or child.name.startswith("._")):
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+            elif child.is_dir() and name_low in ("@eadir", ".appledouble"):
+                try:
+                    if not any(child.iterdir()):
+                        child.rmdir()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def remove_truly_empty_dirs(dirs_to_check: List[Path]) -> List[str]:
     removed: List[str] = []
     seen = set()
@@ -1760,7 +1783,10 @@ def remove_truly_empty_dirs(dirs_to_check: List[Path]) -> List[str]:
                 break
             seen.add(cur)
             try:
-                if cur.exists() and cur.is_dir() and not any(cur.iterdir()):
+                if not cur.exists() or not cur.is_dir():
+                    break
+                _clean_os_junk_in_dir(cur)
+                if not any(cur.iterdir()):
                     cur.rmdir()
                     removed.append(cur.relative_to(MUSIC_DIR).as_posix())
                     cur = cur.parent
@@ -1768,6 +1794,44 @@ def remove_truly_empty_dirs(dirs_to_check: List[Path]) -> List[str]:
                     break
             except OSError:
                 break
+    return removed
+
+
+def cleanup_residual_source_dirs() -> List[str]:
+    """Entfernt Alt-Ordner ausserhalb der Zielwurzeln (Lossless/Lossy/_Review/_Duplikate/DJ-Remixes),
+    wenn darin keine Audio-, Video- oder sonstigen Benutzerdateien mehr liegen (nur OS-Junk oder verwaistes cover.jpg)."""
+    if not _path_exists_safe(MUSIC_DIR):
+        return []
+    removed: List[str] = []
+    try:
+        top_children = sorted(MUSIC_DIR.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return []
+
+    for top in top_children:
+        if not top.is_dir() or top.name.lower() in _TARGET_ROOT_DIRS:
+            continue
+        # Bottom-up walk inside this legacy source folder
+        for root_str, dirnames, filenames in os.walk(str(top), topdown=False):
+            cur = Path(root_str)
+            _clean_os_junk_in_dir(cur)
+            try:
+                remaining = list(cur.iterdir())
+            except OSError:
+                continue
+            # Verwaistes cover.jpg nur dann entfernen, wenn keine anderen Dateien/Unterordner mehr da sind
+            if len(remaining) == 1 and remaining[0].is_file() and remaining[0].name.lower() == "cover.jpg":
+                try:
+                    remaining[0].unlink()
+                    remaining = []
+                except OSError:
+                    pass
+            if not remaining:
+                try:
+                    cur.rmdir()
+                    removed.append(cur.relative_to(MUSIC_DIR).as_posix())
+                except OSError:
+                    pass
     return removed
 
 
@@ -2252,6 +2316,7 @@ def _execute_move_entries(
     moved_count = 0
     total_ops = len(planned_ops)
     touched_source_dirs: List[Path] = []
+    src_to_dst_dirs: Dict[Path, Path] = {}
     actual_track_moves: Dict[str, str] = {}
 
     for idx, (entry, src_p, dst_p) in enumerate(planned_ops):
@@ -2266,10 +2331,22 @@ def _execute_move_entries(
                 final_dst = _unique_non_overwriting_path(dst_p)
                 final_dst.parent.mkdir(parents=True, exist_ok=True)
                 touched_source_dirs.append(src_p.parent)
+                src_to_dst_dirs.setdefault(src_p.parent, final_dst.parent)
                 try:
                     os.replace(src_p, final_dst)
                 except OSError:
                     shutil.move(str(src_p), str(final_dst))
+
+                # Zugehoerige .lrc-Sidecar-Datei aus Modus 2 direkt mitverschieben
+                if entry.get("kind") == "move_track":
+                    src_lrc = src_p.with_suffix(".lrc")
+                    if src_lrc.exists() and src_lrc.is_file():
+                        dst_lrc = _unique_non_overwriting_path(final_dst.with_suffix(".lrc"))
+                        try:
+                            os.replace(src_lrc, dst_lrc)
+                        except OSError:
+                            pass
+
                 final_rel = final_dst.relative_to(MUSIC_DIR).as_posix()
                 entry["toPath"] = final_rel
                 entry["status"] = "done"
@@ -2288,9 +2365,48 @@ def _execute_move_entries(
             journal["lastFsyncIso"] = datetime.now(timezone.utc).isoformat()
             atomic_write_json(JOURNAL_PATH, journal)
 
+    # Von Modus 2 erzeugte cover.jpg-Dateien in den Zielordner uebernehmen (oder verwaiste Duplikate bereinigen)
+    for src_dir_p, dst_dir_p in src_to_dst_dirs.items():
+        if not src_dir_p.exists() or not src_dir_p.is_dir():
+            continue
+        src_cover = src_dir_p / "cover.jpg"
+        if not src_cover.exists() or not src_cover.is_file():
+            continue
+        try:
+            has_remaining_audio = any(
+                c.is_file() and c.suffix.lower() in AUDIO_EXTS for c in src_dir_p.iterdir()
+            )
+        except OSError:
+            has_remaining_audio = True
+        if has_remaining_audio:
+            continue
+        dst_cover = dst_dir_p / "cover.jpg"
+        try:
+            dst_top = dst_dir_p.relative_to(MUSIC_DIR).parts[0].lower() if dst_dir_p != MUSIC_DIR else ""
+        except ValueError:
+            dst_top = ""
+        if dst_top not in ("_duplikate", "_review") and not dst_cover.exists():
+            try:
+                dst_dir_p.mkdir(parents=True, exist_ok=True)
+                os.replace(src_cover, dst_cover)
+                continue
+            except OSError:
+                pass
+        # Nur wenn im Quellordner sonst keine echten Dateien mehr liegen, verwaistes cover.jpg entfernen
+        try:
+            _clean_os_junk_in_dir(src_dir_p)
+            others = [c for c in src_dir_p.iterdir() if c != src_cover]
+            if not others:
+                src_cover.unlink()
+        except OSError:
+            pass
+
     removed_dirs: List[str] = []
-    if cfg.get("cleanupEmptyDirs", True) and touched_source_dirs:
-        removed_dirs = remove_truly_empty_dirs(touched_source_dirs)
+    if cfg.get("cleanupEmptyDirs", True):
+        if touched_source_dirs:
+            removed_dirs.extend(remove_truly_empty_dirs(touched_source_dirs))
+        removed_dirs.extend(cleanup_residual_source_dirs())
+        removed_dirs = list(dict.fromkeys(removed_dirs))
         journal["removedEmptyDirs"] = list(
             dict.fromkeys((journal.get("removedEmptyDirs") or []) + removed_dirs)
         )
@@ -2390,6 +2506,12 @@ async def api_queue_resume() -> Dict[str, Any]:
 async def api_rescan() -> Dict[str, Any]:
     state = await asyncio.to_thread(ensure_state_loaded, True, _update_scan_progress)
     return {"rescanned": True, "trackCount": len(state.get("tracks") or [])}
+
+
+@app.post("/api/cleanup-empty")
+async def api_cleanup_empty() -> Dict[str, Any]:
+    removed = await asyncio.to_thread(cleanup_residual_source_dirs)
+    return {"cleaned": True, "removedCount": len(removed), "removedDirs": removed[:50]}
 
 
 @app.post("/api/backup/confirm")

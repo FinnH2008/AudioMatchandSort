@@ -1129,6 +1129,28 @@ export default function App() {
     showToast('Cache geleert.');
   };
 
+  const handleCleanupEmptyDirs = async () => {
+    if (!backendConnected) return;
+    const res = await postBackendAction<{ cleaned?: boolean; removedCount?: number }>(
+      backendUrl,
+      '/api/cleanup-empty'
+    );
+    const count = res?.removedCount ?? 0;
+    showToast(
+      count > 0
+        ? `${count} leere Alt-Ordner / verwaiste Cover-Ordner entfernt.`
+        : 'Keine leeren Alt-Ordner gefunden (Ordner enthalten noch echte Dateien).'
+    );
+  };
+
+  const handleRescanBackend = async () => {
+    if (!backendConnected) return;
+    showToast('Scanne /music auf der Festplatte neu …');
+    await postBackendAction(backendUrl, '/api/rescan');
+    await checkAndLoadBackend(backendUrl, true);
+    showToast('Musikordner (/music) frisch eingelesen.');
+  };
+
   const selectedTrack = selectedTrackId
     ? tracks.find((t) => t.id === selectedTrackId) ?? null
     : null;
@@ -1206,6 +1228,8 @@ export default function App() {
               onResumeInterrupted={() => void handleResumeInterrupted()}
               onRollbackJournal={() => void handleRollbackJournal()}
               onRetryFailedLookups={(opts) => void handleRetryFailedLookups(opts)}
+              onRescanBackend={() => void handleRescanBackend()}
+              onCleanupEmptyDirs={() => void handleCleanupEmptyDirs()}
             />
           )}
 

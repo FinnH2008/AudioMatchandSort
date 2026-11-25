@@ -878,4 +878,60 @@ test('evaluateLibraryPlan auto-disambiguates colliding and overly long paths wit
   assert.equal(nextAction.enabled, true);
 });
 
+test('Companion files follow _Review / DJ-Remixes target directories and _Review never double-nests on rescan', () => {
+  const revTrack = makeTrack({
+    id: 'rev-comp-1',
+    title: 'Already Reviewed',
+    codec: 'flac',
+    extension: '.flac',
+    sourceDir: '_Review/Lossless/old_artist/old_album',
+    sourceRelativePath: '_Review/Lossless/old_artist/old_album/01.flac',
+    acoustidConfidence: 0.4,
+    matchedRelease: null,
+  });
+  const unmovedRev = makeTrack({
+    id: 'rev-comp-2',
+    title: 'Fresh Review',
+    codec: 'mp3',
+    extension: '.mp3',
+    bitDepth: null,
+    bitrateKbps: 192,
+    sourceDir: 'legacy_artist/legacy_album',
+    sourceRelativePath: 'legacy_artist/legacy_album/02.mp3',
+    acoustidConfidence: 0.3,
+    matchedRelease: null,
+  });
+
+  const plan = evaluateLibraryPlan(
+    [revTrack, unmovedRev],
+    [
+      {
+        id: 'comp-rev',
+        sourceRelativePath: 'legacy_artist/legacy_album/cover.jpg',
+        sourceDir: 'legacy_artist/legacy_album',
+        fileName: 'cover.jpg',
+        extension: '.jpg',
+        sizeBytes: 50000,
+        albumKey: 'legacy_artist/legacy_album',
+        targetPath: null,
+        moved: false,
+      },
+    ],
+    [],
+    DEFAULT_CONFIG,
+    { decisions: {}, renamedCanonical: {} },
+    { decisions: {}, selectedOriginals: {} }
+  );
+
+  assert.equal(
+    plan.trackPlans.get('rev-comp-1')?.targetRelativePath,
+    '_Review/Lossless/old_artist/old_album/01.flac'
+  );
+  assert.equal(
+    plan.evaluatedCompanions[0].targetPath,
+    '_Review/Lossy/legacy_artist/legacy_album/cover.jpg'
+  );
+});
+
+
 

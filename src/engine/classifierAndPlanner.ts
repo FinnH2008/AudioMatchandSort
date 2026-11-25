@@ -822,8 +822,11 @@ export function evaluateLibraryPlan(
       } else {
         // Quality-split _Review/Lossless/{relPath} or _Review/Lossy/{relPath} per Codec
         const reviewBucket = isLosslessCodec(track.codec) ? 'Lossless' : 'Lossy';
-        const parts = String(track.sourceRelativePath ?? track.fileName ?? '').split('/');
+        const parts = String(track.sourceRelativePath ?? track.fileName ?? '').split('/').filter(Boolean);
         const origFile = parts.pop() ?? track.fileName ?? 'Unbekannt';
+        if (parts[0] === '_Review' && (parts[1] === 'Lossless' || parts[1] === 'Lossy')) {
+          parts.splice(0, 2);
+        }
         const origStem = origFile.replace(/\.[^.]+$/, '');
         const san = sanitizeRelativePath(
           ['_Review', reviewBucket, ...parts],
@@ -933,6 +936,7 @@ export function evaluateLibraryPlan(
   }
 
   // Resolve companion file target folders from their parent album's resolved directory
+  // Prioritize album_track folders, then fall back to dj_remix or moved _Review folders so old dirs can empty cleanly
   const sourceDirToTargetDir = new Map<string, string>();
   for (const track of tracks) {
     const plan = trackPlans.get(track.id);
@@ -940,6 +944,22 @@ export function evaluateLibraryPlan(
     const targetDir = plan.targetRelativePath.split('/').slice(0, -1).join('/');
     if (targetDir && !sourceDirToTargetDir.has(track.sourceDir)) {
       sourceDirToTargetDir.set(track.sourceDir, targetDir);
+    }
+  }
+  for (const track of tracks) {
+    if (sourceDirToTargetDir.has(track.sourceDir)) continue;
+    const plan = trackPlans.get(track.id);
+    if (!plan || plan.isDuplicateToMove) continue;
+    if (
+      plan.classification === 'dj_remix' ||
+      (!config.keepReviewTracksInPlace &&
+        (plan.classification === 'review_low_confidence' ||
+          plan.classification === 'review_no_release_match'))
+    ) {
+      const targetDir = plan.targetRelativePath.split('/').slice(0, -1).join('/');
+      if (targetDir) {
+        sourceDirToTargetDir.set(track.sourceDir, targetDir);
+      }
     }
   }
 
