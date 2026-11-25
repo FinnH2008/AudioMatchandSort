@@ -93,14 +93,64 @@ export default function App() {
   const [importProgressLabel, setImportProgressLabel] = useState('');
   const [activeSourceLabel, setActiveSourceLabel] = useState<string | null>(null);
 
-  const [artistOverrides, setArtistOverrides] = useState<ArtistResolutionOverrides>({
-    decisions: {},
-    renamedCanonical: {},
+  const [artistOverrides, setArtistOverrides] = useState<ArtistResolutionOverrides>(() => {
+    if (typeof window === 'undefined') return { decisions: {}, renamedCanonical: {} };
+    try {
+      const raw = window.localStorage.getItem('tonarchiv:artistOverrides');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return {
+            decisions: parsed.decisions && typeof parsed.decisions === 'object' ? parsed.decisions : {},
+            renamedCanonical:
+              parsed.renamedCanonical && typeof parsed.renamedCanonical === 'object'
+                ? parsed.renamedCanonical
+                : {},
+          };
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return { decisions: {}, renamedCanonical: {} };
   });
-  const [duplicateOverrides, setDuplicateOverrides] = useState<DuplicateOverrides>({
-    decisions: {},
-    selectedOriginals: {},
+  const [duplicateOverrides, setDuplicateOverrides] = useState<DuplicateOverrides>(() => {
+    if (typeof window === 'undefined') return { decisions: {}, selectedOriginals: {} };
+    try {
+      const raw = window.localStorage.getItem('tonarchiv:duplicateOverrides');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return {
+            decisions: parsed.decisions && typeof parsed.decisions === 'object' ? parsed.decisions : {},
+            selectedOriginals:
+              parsed.selectedOriginals && typeof parsed.selectedOriginals === 'object'
+                ? parsed.selectedOriginals
+                : {},
+          };
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return { decisions: {}, selectedOriginals: {} };
   });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('tonarchiv:artistOverrides', JSON.stringify(artistOverrides));
+    } catch {
+      // ignore quota errors
+    }
+  }, [artistOverrides]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('tonarchiv:duplicateOverrides', JSON.stringify(duplicateOverrides));
+    } catch {
+      // ignore quota errors
+    }
+  }, [duplicateOverrides]);
 
   // 3 sequential modes state
   const [mode1Completed, setMode1Completed] = useState(false);
@@ -629,8 +679,19 @@ export default function App() {
         .map((t) => {
           const plan = evaluation.trackPlans.get(t.id);
           return {
-            ...t,
+            id: t.id,
+            sourceRelativePath: t.sourceRelativePath,
+            fileName: t.fileName,
+            originalTags: t.originalTags,
+            artist: t.artist,
             albumArtist: plan?.resolvedAlbumArtist ?? t.albumArtist,
+            title: t.title,
+            album: t.album,
+            year: t.year,
+            trackNumber: t.trackNumber,
+            genre: t.genre,
+            cover: t.cover,
+            lyrics: t.lyrics,
             isDjRemix: plan?.classification === 'dj_remix' || t.manualAssignment === 'dj_remix',
           };
         });
@@ -702,12 +763,21 @@ export default function App() {
         setBackupModalOpen(true);
         return;
       }
-      await postBackendAction(backendUrl, '/api/mode/tag', {
-        config,
-        tracks: buildTagPayload(),
-      });
-      await checkAndLoadBackend(backendUrl, true);
-      showToast('Modus 2 (Taggen) über FastAPI-Container abgeschlossen.');
+      const res = await postBackendAction<{ started?: boolean; reason?: string }>(
+        backendUrl,
+        '/api/mode/tag',
+        {
+          config,
+          tracks: buildTagPayload(),
+        }
+      );
+      if (res && res.started === false) {
+        showToast(res.reason || 'Modus 2 konnte nicht gestartet werden.');
+        return;
+      }
+      const q = await fetchBackendQueue(backendUrl);
+      if (q) setQueue(q);
+      showToast('Modus 2 (Taggen & Cover) im Docker-Container gestartet.');
       return;
     }
 
@@ -761,11 +831,21 @@ export default function App() {
     }
 
     if (modeToLaunch === 'tag') {
-      await postBackendAction(backendUrl, '/api/mode/tag', {
-        config,
-        tracks: buildTagPayload(),
-      });
-      showToast('Modus 2 (Taggen) über FastAPI-Container abgeschlossen.');
+      const res = await postBackendAction<{ started?: boolean; reason?: string }>(
+        backendUrl,
+        '/api/mode/tag',
+        {
+          config,
+          tracks: buildTagPayload(),
+        }
+      );
+      if (res && res.started === false) {
+        showToast(res.reason || 'Modus 2 konnte nicht gestartet werden.');
+        return;
+      }
+      const q = await fetchBackendQueue(backendUrl);
+      if (q) setQueue(q);
+      showToast('Modus 2 (Taggen & Cover) im Docker-Container gestartet.');
     } else if (modeToLaunch === 'rerun') {
       const { moves } = buildMovePayload(pendingReRunTracks);
       await postBackendAction(backendUrl, '/api/mode/rerun', {
@@ -945,6 +1025,38 @@ export default function App() {
     }));
   };
 
+  const handleConfirmAllDuplicateRecommendations = () => {
+    const nextDecisions: Record<string, DuplicateDecision> = { ...duplicateOverrides.decisions };
+    let count = 0;
+    for (const g of evaluation.duplicateGroups) {
+      if (g.scope !== 'cross_album_notice') {
+        nextDecisions[g.id] = 'confirmed';
+        count += 1;
+      }
+    }
+    setDuplicateOverrides((prev) => ({
+      ...prev,
+      decisions: nextDecisions,
+    }));
+    showToast(`Alle ${count} Duplikat-Empfehlungen übernommen (Duplikate → _Duplikate/).`);
+  };
+
+  const handleKeepAllDuplicates = () => {
+    const nextDecisions: Record<string, DuplicateDecision> = { ...duplicateOverrides.decisions };
+    let count = 0;
+    for (const g of evaluation.duplicateGroups) {
+      if (g.scope !== 'cross_album_notice') {
+        nextDecisions[g.id] = 'keep_both';
+        count += 1;
+      }
+    }
+    setDuplicateOverrides((prev) => ({
+      ...prev,
+      decisions: nextDecisions,
+    }));
+    showToast(`Alle ${count} Duplikat-Gruppen auf „Alle behalten“ gesetzt.`);
+  };
+
   const handleClearCache = async () => {
     clearBrowserLookupCache();
     if (backendConnected) {
@@ -1046,6 +1158,8 @@ export default function App() {
               tracks={tracks}
               onSelectOriginal={handleSelectDuplicateOriginal}
               onSetDecision={handleSetDuplicateDecision}
+              onConfirmAllRecommendations={handleConfirmAllDuplicateRecommendations}
+              onKeepAllDuplicates={handleKeepAllDuplicates}
             />
           )}
 

@@ -1593,6 +1593,7 @@ def write_tags_to_audio_file(
     track: Dict[str, Any],
     cfg: Dict[str, Any],
     is_dj_remix: bool = False,
+    cover_cache: Optional[Dict[str, Optional[Tuple[bytes, str]]]] = None,
 ) -> Dict[str, Any]:
     """Schreibt Tags via Mutagen. Bei DJ-Remixes bleiben Artist/Titel unveraendert."""
     if MutagenFile is None or not full_path.exists():
@@ -1653,10 +1654,27 @@ def write_tags_to_audio_file(
     )
     if should_embed_cover:
         try:
-            resp = requests.get(cover_url, timeout=12)
-            if resp.status_code == 200 and resp.content:
-                img_bytes = resp.content
-                mime = resp.headers.get("content-type", "image/jpeg").split(";")[0]
+            cached_img = cover_cache.get(cover_url) if cover_cache is not None else None
+            img_bytes: Optional[bytes] = None
+            mime = "image/jpeg"
+            if cover_cache is not None and cover_url in cover_cache:
+                if cached_img is not None:
+                    img_bytes, mime = cached_img
+            else:
+                resp = _HTTP_SESSION.get(
+                    cover_url, headers={"User-Agent": MB_USER_AGENT}, timeout=12
+                )
+                if resp.status_code == 200 and resp.content:
+                    img_bytes = resp.content
+                    mime = resp.headers.get("content-type", "image/jpeg").split(";")[0]
+                    if cover_cache is not None:
+                        if len(cover_cache) > 120:
+                            cover_cache.clear()
+                        cover_cache[cover_url] = (img_bytes, mime)
+                elif cover_cache is not None:
+                    cover_cache[cover_url] = None
+
+            if img_bytes:
                 if ext == ".flac" and FLAC is not None and Picture is not None:
                     fl = FLAC(str(full_path))
                     pic = Picture()
@@ -2066,7 +2084,10 @@ async def _startup_background_pipeline() -> None:
 
 
 def _execute_tag_entries(
-    items: List[Dict[str, Any]], cfg: Dict[str, Any], mode_name: str
+    items: List[Dict[str, Any]],
+    cfg: Dict[str, Any],
+    mode_name: str,
+    progress_cb: Optional[Callable[[int, int, str, bool], None]] = None,
 ) -> Tuple[int, int]:
     journal = load_journal()
     if not journal.get("backupConfirmedAt"):
@@ -2082,11 +2103,11 @@ def _execute_tag_entries(
     journal["state"] = "in_progress"
     journal["lastFsyncIso"] = now_iso
 
-    tagged_count = 0
-    skipped_count = 0
     entries: List[Dict[str, Any]] = list(journal.get("entries") or [])
+    planned_ops: List[Tuple[Dict[str, Any], Path, Dict[str, Any]]] = []
+    skipped_count = 0
 
-    for item in items:
+    for idx, item in enumerate(items):
         rel_path = item.get("sourceRelativePath")
         if not rel_path:
             continue
@@ -2094,31 +2115,52 @@ def _execute_tag_entries(
         if not full_path.exists():
             skipped_count += 1
             continue
-
         entry = {
-            "id": f"tag-{item.get('id', tagged_count)}-{int(time.time())}",
+            "id": f"tag-{item.get('id', idx)}-{int(time.time())}",
             "kind": "tag_track",
             "trackId": item.get("id"),
             "fromPath": rel_path,
             "toPath": rel_path,
             "originalTagsSnapshot": item.get("originalTags") or {},
             "status": "planned",
-            "timestampIso": datetime.now(timezone.utc).isoformat(),
+            "timestampIso": now_iso,
         }
         entries.append(entry)
-        journal["entries"] = entries
-        journal["lastFsyncIso"] = datetime.now(timezone.utc).isoformat()
-        atomic_write_json(JOURNAL_PATH, journal)
+        planned_ops.append((entry, full_path, item))
 
+    # Write-Ahead-Journal EINMAL vor der ersten Dateiaenderung mit allen Original-Tags schreiben
+    journal["entries"] = entries
+    journal["lastFsyncIso"] = datetime.now(timezone.utc).isoformat()
+    atomic_write_json(JOURNAL_PATH, journal)
+
+    tagged_count = 0
+    total_ops = len(planned_ops)
+    cover_cache: Dict[str, Optional[Tuple[bytes, str]]] = {}
+
+    for idx, (entry, full_path, item) in enumerate(planned_ops):
         res = write_tags_to_audio_file(
-            full_path, item, cfg, is_dj_remix=bool(item.get("isDjRemix", False))
+            full_path,
+            item,
+            cfg,
+            is_dj_remix=bool(item.get("isDjRemix", False)),
+            cover_cache=cover_cache,
         )
-        if res.get("tagged"):
+        ok = bool(res.get("tagged"))
+        if ok:
             entry["status"] = "done"
             tagged_count += 1
         else:
             entry["status"] = "failed"
             skipped_count += 1
+        entry["timestampIso"] = datetime.now(timezone.utc).isoformat()
+
+        if progress_cb:
+            label = f"{item.get('artist', '')} — {item.get('title', item.get('fileName', ''))}"
+            progress_cb(idx + 1, total_ops, label, ok)
+
+        if (idx + 1) % 25 == 0 or (idx + 1) == total_ops:
+            journal["lastFsyncIso"] = entry["timestampIso"]
+            atomic_write_json(JOURNAL_PATH, journal)
 
     journal["state"] = "completed"
     journal["lastFsyncIso"] = datetime.now(timezone.utc).isoformat()
@@ -2406,27 +2448,106 @@ def _merge_persisted_lyrics(
     return merged
 
 
+async def _run_tag_job(
+    target_tracks: List[Dict[str, Any]],
+    cfg: Dict[str, Any],
+) -> None:
+    global queue_state
+    try:
+        total = len(target_tracks)
+        queue_state = QueueStatus(
+            activeMode="tag",
+            status="running" if total > 0 else "completed",
+            processedCount=0,
+            totalCount=total,
+            errorCount=0,
+            cacheHitCount=0,
+            etaSeconds=max(1, total // 5) if total > 0 else 0,
+            currentTrackLabel="Schreibe Write-Ahead-Journal (rollback.json) …",
+            checkpointIndex=0,
+            errors=[],
+        )
+        print(f"[TonArchiv] Modus 2 (Taggen) gestartet fuer {total} Tracks.", flush=True)
+
+        def _on_tag_progress(done: int, tot: int, label: str, ok: bool) -> None:
+            queue_state.processedCount = done
+            queue_state.totalCount = tot
+            queue_state.checkpointIndex = done
+            queue_state.currentTrackLabel = label
+            queue_state.etaSeconds = max(0, (tot - done) // 5)
+            if not ok:
+                queue_state.errorCount += 1
+                queue_state.errors.append(
+                    {
+                        "id": f"tag-err-{done}",
+                        "stage": "Mutagen",
+                        "trackLabel": label,
+                        "message": "Datei konnte nicht getaggt werden (uebersprungen).",
+                        "recovered": True,
+                    }
+                )
+                if len(queue_state.errors) > 25:
+                    queue_state.errors = queue_state.errors[-25:]
+            if done % 50 == 0 or done == tot:
+                print(f"[TonArchiv] Modus 2 (Taggen): {done}/{tot} Tracks.", flush=True)
+
+        tagged, skipped = await asyncio.to_thread(
+            _execute_tag_entries, target_tracks, cfg, "tag", _on_tag_progress
+        )
+
+        state = await asyncio.to_thread(ensure_state_loaded, False)
+        persisted_tracks = state.get("tracks") or []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        tagged_ids = {t.get("id") for t in target_tracks}
+        for t in persisted_tracks:
+            if t.get("id") in tagged_ids:
+                t["status"] = "tagged"
+                t["taggedAt"] = now_iso
+        state["mode2Completed"] = True
+        snapshot = {**state, "tracks": list(persisted_tracks)}
+        await asyncio.to_thread(save_persisted_state, snapshot)
+
+        queue_state.status = "completed"
+        queue_state.processedCount = total
+        queue_state.etaSeconds = 0
+        queue_state.currentTrackLabel = ""
+        print(
+            f"[TonArchiv] Modus 2 abgeschlossen (getaggt: {tagged}, uebersprungen: {skipped}).",
+            flush=True,
+        )
+    except Exception as exc:
+        queue_state.status = "error"
+        queue_state.currentTrackLabel = f"Tagging-Fehler: {exc}"
+        print(f"[TonArchiv] Fehler in Modus 2: {exc}", flush=True)
+
+
 @app.post("/api/mode/tag")
-def api_mode_tag(req: ModeTagRequest) -> Dict[str, Any]:
+async def api_mode_tag(req: ModeTagRequest) -> Dict[str, Any]:
+    global active_task
+    if active_task and not active_task.done():
+        return {
+            "started": False,
+            "reason": "Eine Hintergrund-Aufgabe laeuft bereits",
+            "queue": asdict(queue_state),
+        }
+    journal = load_journal()
+    if not journal.get("backupConfirmedAt"):
+        raise HTTPException(
+            status_code=400,
+            detail="Backup-Bestaetigung erforderlich, bevor Modus 2 Dateien beschreibt.",
+        )
+
     cfg = {**build_server_config(), **(req.config or {})}
-    state = ensure_state_loaded(force_rescan=False)
+    state = await asyncio.to_thread(ensure_state_loaded, False)
     persisted_tracks = state.get("tracks") or []
     target_tracks = (
         _merge_persisted_lyrics(req.tracks, persisted_tracks)
         if req.tracks is not None
         else persisted_tracks
     )
-    tagged, skipped = _execute_tag_entries(target_tracks, cfg, "tag")
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-    tagged_ids = {t.get("id") for t in target_tracks}
-    for t in persisted_tracks:
-        if t.get("id") in tagged_ids:
-            t["status"] = "tagged"
-            t["taggedAt"] = now_iso
-    state["mode2Completed"] = True
-    save_persisted_state(state)
-    return {"completed": True, "tagged": tagged, "skipped": skipped}
+    pause_event.set()
+    active_task = asyncio.create_task(_run_tag_job(target_tracks, cfg))
+    return {"started": True, "mode": "tag", "total": len(target_tracks)}
 
 
 @app.post("/api/mode/move")
