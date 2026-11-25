@@ -19,19 +19,18 @@ Füge die `docker-compose.yml` ein (oder wähle das GitHub-Repo in Portainer) un
 | Variable | Pflicht? | Beispiel / Standard | Beschreibung |
 | :--- | :--- | :--- | :--- |
 | `TONARCHIV_IMAGE` | Nein (vorbelegt) | `ghcr.io/finnh2008/audiomatchandsort:latest` | Dein fertiges GHCR-Image |
-| `HOST_MUSIC_DIR` | **Ja** | `/srv/Music Full Quality` | Musikordner auf dem Host (genau ein Mount!) |
-| `HOST_CONFIG_DIR` | Empfohlen | `/srv/tonarchiv/config` | Persistenter Ordner für Cache & Journal |
+| `HOST_MUSIC_DIR` | **Ja** (falls abweichend) | `/srv/Music Full Quality` | Musikordner auf dem Host (genau ein Mount, ohne Anführungszeichen!) |
 | `TONARCHIV_PORT` | Nein | `7070` | Port für das Web-Dashboard |
 | `PUID` / `PGID` | Empfohlen | `1000` / `1000` | NAS-Benutzerrechte (`id -u` / `id -g`) |
-| `AUTO_ANALYZE_ON_START` | Nein | `true` | Startet Modus 1 (Read-Only Analyse) direkt nach dem Booten |
+| `AUTO_ANALYZE_ON_START` | Nein | `false` | `false` = Web-UI startet sofort mit wenig RAM; `true` = Scan/Analyse beim Booten |
 | `ACOUSTID_API_KEY` | Optional | — | Kostenlos auf `acoustid.org/new-application` (Fingerprinting) |
 | `DISCOGS_TOKEN` | Optional | — | Kostenlos auf `discogs.com/settings/developers` (DJ-Remixes) |
 | `MUSICBRAINZ_CONTACT` | Optional | `mailto:du@example.de` | Kontakt für den MusicBrainz User-Agent |
 
-> MusicBrainz, Cover Art Archive und LRCLIB funktionieren komplett **ohne API-Key**.
+> MusicBrainz, Cover Art Archive und LRCLIB funktionieren komplett **ohne API-Key**. Cache & Journal werden automatisch im Docker-Volume `tonarchiv_config` gespeichert.
 
 ### 3. Öffnen & loslegen
-Nach dem Deploy zieht Docker das fertige Image, übernimmt alle Umgebungsvariablen automatisch, scannt deinen gemounteten Musikordner und startet (bei `AUTO_ANALYZE_ON_START=true`) die Read-Only Analyse von alleine.
+Nach dem Deploy startet die Web-UI innerhalb von ca. 2 Sekunden auf Port 7070. Öffne das Dashboard und klicke auf **„Modus 1: Bibliothek scannen & analysieren“** (oder setze optional `AUTO_ANALYZE_ON_START=true`).
 
 ```
 http://<deine-homeserver-ip>:7070

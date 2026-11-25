@@ -14,8 +14,8 @@ services:
       MUSIC_DIR: "/music"
       CONFIG_DIR: "/config"
 
-      # --- Autostart (Read-Only Analyse startet direkt beim Container-Start) ---
-      AUTO_ANALYZE_ON_START: "${AUTO_ANALYZE_ON_START:-true}"
+      # --- Autostart (false = Web-UI startet sofort mit wenig RAM; true = Scan/Analyse direkt beim Booten) ---
+      AUTO_ANALYZE_ON_START: "${AUTO_ANALYZE_ON_START:-false}"
 
       # --- API-Keys & Kontakt (alle optional; MusicBrainz + LRCLIB + Cover Art laufen ohne Key) ---
       ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"

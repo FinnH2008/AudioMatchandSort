@@ -476,6 +476,21 @@ test('3-Mode Gate handles empty library, browser-only read-only mode, conflicts,
   assert.equal(empty.enabled, false);
   assert.equal(empty.label, 'Keine Dateien geladen');
 
+  const emptyConnected = computeNextModeAction({
+    mode1Completed: false,
+    mode2Completed: false,
+    mode3Completed: false,
+    openArtistConflictCount: 0,
+    pathCollisionCount: 0,
+    pendingReRunCount: 0,
+    queueRunningOrPaused: false,
+    hasInterruptedJournal: false,
+    totalTracks: 0,
+    backendConnected: true,
+  });
+  assert.equal(emptyConnected.enabled, true);
+  assert.equal(emptyConnected.mode, 'analyze');
+
   const m2BrowserOnly = computeNextModeAction({
     mode1Completed: true,
     mode2Completed: false,
@@ -571,7 +586,7 @@ test('Compilation release matcher searches exclusively compilation releases and 
   const envEx = bundle.find((f) => f.filename === '.env.example')!.content;
   assert.ok(envEx.includes('TONARCHIV_IMAGE=ghcr.io/meinuser/tonarchiv:latest'));
   assert.ok(envEx.includes('TONARCHIV_PORT=7070'));
-  assert.ok(envEx.includes('AUTO_ANALYZE_ON_START=true'));
+  assert.ok(envEx.includes('AUTO_ANALYZE_ON_START=false'));
   assert.ok(envEx.includes('ACOUSTID_API_KEY='));
   assert.ok(envEx.includes('DISCOGS_TOKEN='));
   const readme = bundle.find((f) => f.filename === 'README.md')!.content;

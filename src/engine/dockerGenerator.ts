@@ -29,7 +29,7 @@ export function generateDockerBundle(
       PGID: "\${PGID:-${config.pgid}}"
       MUSIC_DIR: "/music"
       CONFIG_DIR: "/config"
-      AUTO_ANALYZE_ON_START: "\${AUTO_ANALYZE_ON_START:-true}"
+      AUTO_ANALYZE_ON_START: "\${AUTO_ANALYZE_ON_START:-false}"
       ACOUSTID_API_KEY: "\${ACOUSTID_API_KEY:-}"
       DISCOGS_TOKEN: "\${DISCOGS_TOKEN:-}"
       MUSICBRAINZ_CONTACT: "\${MUSICBRAINZ_CONTACT:-}"
@@ -192,8 +192,8 @@ TONARCHIV_IMAGE=${normalizedImage}
 # Server-Port auf dem Homeserver
 TONARCHIV_PORT=7070
 
-# Read-Only Analyse beim Container-Start automatisch starten
-AUTO_ANALYZE_ON_START=true
+# Read-Only Analyse beim Container-Start automatisch starten (false = Web-UI startet sofort)
+AUTO_ANALYZE_ON_START=false
 
 # Benutzer- & Gruppen-ID auf dem Host (id -u / id -g auf Linux/NAS pruefen)
 PUID=${config.puid}

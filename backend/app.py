@@ -16,6 +16,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
 import os
@@ -27,7 +28,7 @@ import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -103,7 +104,7 @@ STATE_PATH = CONFIG_DIR / "state.json"
 PUID = _env_int("PUID", 1000)
 PGID = _env_int("PGID", 1000)
 HOST_MUSIC_DIR = os.getenv("HOST_MUSIC_DIR", "/srv/Music Full Quality")
-AUTO_ANALYZE_ON_START = _env_bool("AUTO_ANALYZE_ON_START", True)
+AUTO_ANALYZE_ON_START = _env_bool("AUTO_ANALYZE_ON_START", False)
 
 
 def _path_exists_safe(path: Path) -> bool:
@@ -231,10 +232,16 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # 1. Atomares Write-Ahead-Journal & State-Persistenz (temp + fsync + os.replace)
 # ---------------------------------------------------------------------------
-def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+_STATE_CACHE: Optional[Dict[str, Any]] = None
+
+
+def atomic_write_json(path: Path, payload: Dict[str, Any], compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    if compact:
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    else:
+        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     with open(tmp, "wb") as fh:
         fh.write(raw)
         fh.flush()
@@ -276,16 +283,25 @@ def load_journal() -> Dict[str, Any]:
 
 
 def load_persisted_state() -> Optional[Dict[str, Any]]:
+    global _STATE_CACHE
+    if _STATE_CACHE is not None:
+        return _STATE_CACHE
     if not STATE_PATH.exists():
         return None
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _STATE_CACHE = data
+            return data
+        return None
     except Exception:
         return None
 
 
 def save_persisted_state(state: Dict[str, Any]) -> None:
-    atomic_write_json(STATE_PATH, state)
+    global _STATE_CACHE
+    _STATE_CACHE = state
+    atomic_write_json(STATE_PATH, state, compact=True)
 
 
 def safe_resolve_under_music(rel_path: str) -> Path:
@@ -352,7 +368,7 @@ def init_cache_db() -> None:
 
 def cache_get(namespace: str, cache_key: str) -> Optional[Dict[str, Any]]:
     full_key = f"{namespace}:{cache_key}"
-    with sqlite3.connect(CACHE_DB_PATH) as conn:
+    with sqlite3.connect(CACHE_DB_PATH, timeout=10.0) as conn:
         row = conn.execute(
             "SELECT payload_json FROM lookup_cache WHERE cache_key = ?", (full_key,)
         ).fetchone()
@@ -367,7 +383,7 @@ def cache_get(namespace: str, cache_key: str) -> Optional[Dict[str, Any]]:
 def cache_put(namespace: str, cache_key: str, payload: Dict[str, Any]) -> None:
     full_key = f"{namespace}:{cache_key}"
     now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(CACHE_DB_PATH) as conn:
+    with sqlite3.connect(CACHE_DB_PATH, timeout=10.0) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO lookup_cache (cache_key, namespace, payload_json, updated_at)
@@ -380,7 +396,7 @@ def cache_put(namespace: str, cache_key: str, payload: Dict[str, Any]) -> None:
 
 def save_checkpoint(mode: str, last_index: int, total_count: int) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(CACHE_DB_PATH) as conn:
+    with sqlite3.connect(CACHE_DB_PATH, timeout=10.0) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO job_checkpoints (job_id, mode, last_index, total_count, updated_at)
@@ -392,13 +408,13 @@ def save_checkpoint(mode: str, last_index: int, total_count: int) -> None:
 
 
 def clear_checkpoint(mode: str) -> None:
-    with sqlite3.connect(CACHE_DB_PATH) as conn:
+    with sqlite3.connect(CACHE_DB_PATH, timeout=10.0) as conn:
         conn.execute("DELETE FROM job_checkpoints WHERE mode = ?", (mode,))
         conn.commit()
 
 
 def read_cache_stats() -> Dict[str, Any]:
-    with sqlite3.connect(CACHE_DB_PATH) as conn:
+    with sqlite3.connect(CACHE_DB_PATH, timeout=10.0) as conn:
         counts = dict(
             conn.execute("SELECT namespace, COUNT(*) FROM lookup_cache GROUP BY namespace").fetchall()
         )
@@ -515,12 +531,25 @@ def probe_media_file(path: Path) -> Dict[str, Any]:
     }
 
 
+IGNORED_DIR_NAMES = {
+    "@eaDir",
+    "#recycle",
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    "lost+found",
+    ".git",
+    ".Trash",
+    ".Trash-1000",
+}
+
+
 def read_tags_from_file(path: Path, ffprobe_tags: Dict[str, Any]) -> Dict[str, Any]:
     tags_lower: Dict[str, str] = {
         str(k).lower(): str(v).strip() for k, v in ffprobe_tags.items() if v is not None
     }
     has_cover = False
     if MutagenFile is not None:
+        mf = None
         try:
             mf = MutagenFile(str(path), easy=True)
             if mf is not None and mf.tags:
@@ -533,96 +562,202 @@ def read_tags_from_file(path: Path, ffprobe_tags: Dict[str, Any]) -> Dict[str, A
                     "tracknumber",
                     "genre",
                     "isrc",
+                    "compilation",
+                    "bpm",
+                    "initialkey",
+                    "musicbrainz_trackid",
+                    "musicbrainz_artistid",
+                    "acoustid_id",
                 ):
                     val = mf.tags.get(key)
                     if val:
                         tags_lower[key] = str(val[0]).strip()
-            raw_mf = MutagenFile(str(path), easy=False)
-            if raw_mf is not None:
-                if getattr(raw_mf, "pictures", None):
-                    has_cover = len(raw_mf.pictures) > 0
-                elif raw_mf.tags and any(
-                    k.startswith("APIC") or k == "covr" for k in raw_mf.tags.keys()
-                ):
-                    has_cover = True
+                if getattr(mf, "pictures", None):
+                    has_cover = len(mf.pictures) > 0
         except Exception:
             pass
+        finally:
+            if mf is not None:
+                del mf
     return {"tags": tags_lower, "has_cover": has_cover}
 
 
-def scan_music_directory() -> (
-    Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]
-):
+def inspect_audio_fast(path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Speicherschonende Codec- & Tag-Inspektion:
+    - .m4a/.mp4 werden IMMER via ffprobe geprueft (ALAC vs. AAC & echte MP4-Videos sicher erkennen)
+    - Alle uebrigen Audioformate (.flac, .mp3, .ogg, .opus, .wav, .aiff, .wma) laufen direkt
+      ueber Mutagen ohne Subprozess-Storm und ohne Cover-Blobs dauerhaft im RAM zu halten.
+    """
+    ext = path.suffix.lower()
+    if ext in (".m4a", ".mp4") or MutagenFile is None:
+        probed = probe_media_file(path)
+        if probed.get("kind") != "audio":
+            return probed, {"tags": {}, "has_cover": False}
+        meta = read_tags_from_file(path, probed.get("tags") or {})
+        return probed, meta
+
+    mf = None
+    try:
+        mf = MutagenFile(str(path), easy=True)
+        if mf is None or getattr(mf, "info", None) is None:
+            probed = probe_media_file(path)
+            if probed.get("kind") != "audio":
+                return probed, {"tags": {}, "has_cover": False}
+            meta = read_tags_from_file(path, probed.get("tags") or {})
+            return probed, meta
+
+        info = mf.info
+        duration = round(float(getattr(info, "length", 0.0) or 0.0))
+        bitrate = int(round(float(getattr(info, "bitrate", 0) or 0) / 1000.0))
+        sample_rate = int(getattr(info, "sample_rate", 44100) or 44100)
+        bit_depth_raw = getattr(info, "bits_per_sample", None)
+        bit_depth = int(bit_depth_raw) if bit_depth_raw and int(bit_depth_raw) > 0 else None
+
+        cls_name = type(mf).__name__.lower()
+        if ext == ".flac" or "flac" in cls_name:
+            mapped_codec = "flac"
+        elif ext == ".mp3" or "mp3" in cls_name:
+            mapped_codec = "mp3"
+        elif ext == ".opus" or "opus" in cls_name:
+            mapped_codec = "opus"
+        elif ext in (".ogg", ".oga") or "vorbis" in cls_name:
+            mapped_codec = "vorbis"
+        elif ext in (".aiff", ".aif") or "aiff" in cls_name:
+            mapped_codec = "aiff"
+        elif ext == ".wma" or "asf" in cls_name:
+            mapped_codec = "wma"
+        elif ext == ".wav" or "wave" in cls_name:
+            mapped_codec = "pcm_s24le" if (bit_depth or 16) >= 24 else "pcm_s16le"
+        elif ext == ".alac":
+            mapped_codec = "alac"
+        else:
+            mapped_codec = map_ffprobe_codec(cls_name, ext, bit_depth)
+
+        tags_lower: Dict[str, str] = {}
+        if mf.tags:
+            for key in (
+                "artist",
+                "albumartist",
+                "title",
+                "album",
+                "date",
+                "tracknumber",
+                "genre",
+                "isrc",
+                "compilation",
+                "bpm",
+                "initialkey",
+                "musicbrainz_trackid",
+                "musicbrainz_artistid",
+                "acoustid_id",
+            ):
+                val = mf.tags.get(key)
+                if val:
+                    tags_lower[key] = str(val[0]).strip()
+
+        has_cover = bool(getattr(mf, "pictures", None))
+        probed = {
+            "kind": "audio",
+            "codec": mapped_codec,
+            "bitrate_kbps": bitrate,
+            "sample_rate_hz": sample_rate,
+            "bit_depth": bit_depth,
+            "duration_sec": duration,
+            "tags": tags_lower,
+        }
+        return probed, {"tags": tags_lower, "has_cover": has_cover}
+    except Exception:
+        probed = probe_media_file(path)
+        if probed.get("kind") != "audio":
+            return probed, {"tags": {}, "has_cover": False}
+        meta = read_tags_from_file(path, probed.get("tags") or {})
+        return probed, meta
+    finally:
+        if mf is not None:
+            del mf
+
+
+def scan_music_directory(
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     tracks: List[Dict[str, Any]] = []
     companions: List[Dict[str, Any]] = []
     leftovers: List[Dict[str, Any]] = []
 
-    if not MUSIC_DIR.exists():
+    if not _path_exists_safe(MUSIC_DIR):
         return tracks, companions, leftovers
 
-    for root, _, filenames in os.walk(MUSIC_DIR):
+    # Schritt 1: Schnelle Dateiliste sammeln (ohne Dateien zu oeffnen) fuer exakten Fortschritt
+    file_entries: List[Tuple[Path, str]] = []
+    for root, dirnames, filenames in os.walk(MUSIC_DIR):
+        dirnames[:] = [
+            d for d in sorted(dirnames) if not d.startswith(".") and d not in IGNORED_DIR_NAMES
+        ]
         root_path = Path(root)
         for fname in sorted(filenames):
             if fname.startswith("."):
                 continue
-            full_path = root_path / fname
-            try:
-                rel_path = full_path.relative_to(MUSIC_DIR).as_posix()
-                stat = full_path.stat()
-            except OSError:
-                continue
+            file_entries.append((root_path / fname, fname))
 
-            ext = full_path.suffix.lower()
-            source_dir = str(Path(rel_path).parent.as_posix())
-            if source_dir == ".":
-                source_dir = ""
-            stable_id = hashlib.sha1(rel_path.encode("utf-8")).hexdigest()[:12]
+    total_files = len(file_entries)
+    print(f"[TonArchiv] Starte Dateiscan in {MUSIC_DIR} ({total_files} Dateien gefunden) ...", flush=True)
+    if progress_cb:
+        progress_cb(0, total_files, f"Scanne {total_files} Dateien in {MUSIC_DIR} ...")
 
-            if ext in VIDEO_EXTS:
-                leftovers.append(
-                    {
-                        "id": f"vid-{stable_id}",
-                        "sourceRelativePath": rel_path,
-                        "sourceDir": source_dir,
-                        "fileName": fname,
-                        "kind": "video",
-                        "reason": "Videodatei — wird niemals angefasst.",
-                        "sizeBytes": stat.st_size,
-                    }
-                )
-                continue
+    for idx, (full_path, fname) in enumerate(file_entries, start=1):
+        try:
+            rel_path = full_path.relative_to(MUSIC_DIR).as_posix()
+            stat = full_path.stat()
+        except OSError:
+            continue
 
-            if ext in COMPANION_EXTS:
-                companions.append(
-                    {
-                        "id": f"comp-{stable_id}",
-                        "sourceRelativePath": rel_path,
-                        "sourceDir": source_dir,
-                        "fileName": fname,
-                        "extension": ext,
-                        "sizeBytes": stat.st_size,
-                        "albumKey": source_dir or fname,
-                        "targetPath": None,
-                        "moved": False,
-                    }
-                )
-                continue
+        ext = full_path.suffix.lower()
+        source_dir = str(Path(rel_path).parent.as_posix())
+        if source_dir == ".":
+            source_dir = ""
+        stable_id = hashlib.sha1(rel_path.encode("utf-8")).hexdigest()[:12]
 
-            if ext not in AUDIO_EXTS:
-                leftovers.append(
-                    {
-                        "id": f"left-{stable_id}",
-                        "sourceRelativePath": rel_path,
-                        "sourceDir": source_dir,
-                        "fileName": fname,
-                        "kind": "other",
-                        "reason": "Keine Audio- oder Begleitdatei — Quellordner bleibt deshalb erhalten.",
-                        "sizeBytes": stat.st_size,
-                    }
-                )
-                continue
-
-            probed = probe_media_file(full_path)
+        if ext in VIDEO_EXTS:
+            leftovers.append(
+                {
+                    "id": f"vid-{stable_id}",
+                    "sourceRelativePath": rel_path,
+                    "sourceDir": source_dir,
+                    "fileName": fname,
+                    "kind": "video",
+                    "reason": "Videodatei — wird niemals angefasst.",
+                    "sizeBytes": stat.st_size,
+                }
+            )
+        elif ext in COMPANION_EXTS:
+            companions.append(
+                {
+                    "id": f"comp-{stable_id}",
+                    "sourceRelativePath": rel_path,
+                    "sourceDir": source_dir,
+                    "fileName": fname,
+                    "extension": ext,
+                    "sizeBytes": stat.st_size,
+                    "albumKey": source_dir or fname,
+                    "targetPath": None,
+                    "moved": False,
+                }
+            )
+        elif ext not in AUDIO_EXTS:
+            leftovers.append(
+                {
+                    "id": f"left-{stable_id}",
+                    "sourceRelativePath": rel_path,
+                    "sourceDir": source_dir,
+                    "fileName": fname,
+                    "kind": "other",
+                    "reason": "Keine Audio- oder Begleitdatei — Quellordner bleibt deshalb erhalten.",
+                    "sizeBytes": stat.st_size,
+                }
+            )
+        else:
+            probed, meta = inspect_audio_fast(full_path)
             if probed.get("kind") == "video":
                 leftovers.append(
                     {
@@ -635,8 +770,7 @@ def scan_music_directory() -> (
                         "sizeBytes": stat.st_size,
                     }
                 )
-                continue
-            if probed.get("kind") != "audio":
+            elif probed.get("kind") != "audio":
                 leftovers.append(
                     {
                         "id": f"left-{stable_id}",
@@ -648,110 +782,122 @@ def scan_music_directory() -> (
                         "sizeBytes": stat.st_size,
                     }
                 )
-                continue
+            else:
+                t = meta["tags"]
+                has_cover = bool(meta["has_cover"])
 
-            meta = read_tags_from_file(full_path, probed.get("tags") or {})
-            t = meta["tags"]
-            has_cover = bool(meta["has_cover"])
+                raw_artist = t.get("artist") or "Unbekannter Kuenstler"
+                raw_album_artist = t.get("albumartist") or t.get("album_artist") or raw_artist
+                raw_title = t.get("title") or full_path.stem
+                raw_album = t.get("album") or ""
+                raw_year = (t.get("date") or t.get("year") or "")[:4]
+                raw_track_num = t.get("tracknumber") or t.get("track") or ""
+                raw_track = raw_track_num.split("/")[0].zfill(2) if raw_track_num else ""
+                raw_genre = t.get("genre") or ""
+                raw_key = t.get("initialkey") or t.get("key") or ""
+                bpm_str = t.get("bpm") or t.get("tbpm") or ""
+                raw_bpm = int(round(float(bpm_str))) if bpm_str.replace(".", "", 1).isdigit() else None
+                is_comp = t.get("compilation", "").lower() in ("1", "true", "yes")
+                mtime_iso = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
 
-            raw_artist = t.get("artist") or "Unbekannter Kuenstler"
-            raw_album_artist = t.get("albumartist") or t.get("album_artist") or raw_artist
-            raw_title = t.get("title") or full_path.stem
-            raw_album = t.get("album") or ""
-            raw_year = (t.get("date") or t.get("year") or "")[:4]
-            raw_track_num = t.get("tracknumber") or t.get("track") or ""
-            raw_track = raw_track_num.split("/")[0].zfill(2) if raw_track_num else ""
-            raw_genre = t.get("genre") or ""
-            raw_key = t.get("initialkey") or t.get("key") or ""
-            bpm_str = t.get("bpm") or t.get("tbpm") or ""
-            raw_bpm = int(round(float(bpm_str))) if bpm_str.replace(".", "", 1).isdigit() else None
-            is_comp = t.get("compilation", "").lower() in ("1", "true", "yes")
-            mtime_iso = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-
-            tracks.append(
-                {
-                    "id": f"trk-{stable_id}",
-                    "sourceRelativePath": rel_path,
-                    "sourceDir": source_dir,
-                    "fileName": fname,
-                    "extension": ext,
-                    "codec": probed["codec"],
-                    "sizeBytes": stat.st_size,
-                    "mtimeIso": mtime_iso,
-                    "durationSec": probed["duration_sec"],
-                    "bitrateKbps": probed["bitrate_kbps"],
-                    "sampleRateHz": probed["sample_rate_hz"],
-                    "bitDepth": probed["bit_depth"],
-                    "spectralCutoffKhz": None,
-                    "spectralWarningOnly": False,
-                    "originalTags": {
-                        "artist": t.get("artist", ""),
-                        "albumArtist": t.get("albumartist") or t.get("album_artist") or "",
-                        "title": t.get("title", ""),
+                tracks.append(
+                    {
+                        "id": f"trk-{stable_id}",
+                        "sourceRelativePath": rel_path,
+                        "sourceDir": source_dir,
+                        "fileName": fname,
+                        "extension": ext,
+                        "codec": probed["codec"],
+                        "sizeBytes": stat.st_size,
+                        "mtimeIso": mtime_iso,
+                        "durationSec": probed["duration_sec"],
+                        "bitrateKbps": probed["bitrate_kbps"],
+                        "sampleRateHz": probed["sample_rate_hz"],
+                        "bitDepth": probed["bit_depth"],
+                        "spectralCutoffKhz": None,
+                        "spectralWarningOnly": False,
+                        "originalTags": {
+                            "artist": t.get("artist", ""),
+                            "albumArtist": t.get("albumartist") or t.get("album_artist") or "",
+                            "title": t.get("title", ""),
+                            "album": raw_album,
+                            "year": raw_year,
+                            "trackNumber": raw_track,
+                            "genre": raw_genre,
+                            "key": raw_key,
+                            "bpm": raw_bpm,
+                            "compilation": is_comp,
+                        },
+                        "albumArtist": raw_album_artist,
+                        "artist": raw_artist,
+                        "title": raw_title,
                         "album": raw_album,
                         "year": raw_year,
                         "trackNumber": raw_track,
                         "genre": raw_genre,
-                        "key": raw_key,
+                        "isrc": t.get("isrc", ""),
+                        "compilationFlag": is_comp,
+                        "mbRecordingId": t.get("musicbrainz_trackid")
+                        or t.get("musicbrainz_recordingid")
+                        or None,
+                        "mbArtistId": t.get("musicbrainz_artistid") or None,
+                        "acoustidId": t.get("acoustid_id") or None,
+                        "acoustidConfidence": 0.94
+                        if (t.get("musicbrainz_trackid") or t.get("musicbrainz_recordingid"))
+                        else 0.0,
+                        "activeSource": "musicbrainz",
+                        "sourceCandidates": [],
+                        "cachedLookup": False,
+                        "matchedRelease": None,
+                        "availableReleases": [],
+                        "inMatchedReleaseTracklist": False,
+                        "matchedReleaseTrackPos": int(raw_track) if raw_track.isdigit() else None,
+                        "isRemixAlbumTrack": False,
+                        "detachedFromAlbum": False,
+                        "detachReason": None,
+                        "musicalKey": raw_key or "—",
+                        "camelotKey": raw_key or "—",
                         "bpm": raw_bpm,
-                        "compilation": is_comp,
-                    },
-                    "albumArtist": raw_album_artist,
-                    "artist": raw_artist,
-                    "title": raw_title,
-                    "album": raw_album,
-                    "year": raw_year,
-                    "trackNumber": raw_track,
-                    "genre": raw_genre,
-                    "isrc": t.get("isrc", ""),
-                    "compilationFlag": is_comp,
-                    "mbRecordingId": t.get("musicbrainz_trackid")
-                    or t.get("musicbrainz_recordingid")
-                    or None,
-                    "mbArtistId": t.get("musicbrainz_artistid") or None,
-                    "acoustidId": t.get("acoustid_id") or None,
-                    "acoustidConfidence": 0.94
-                    if (t.get("musicbrainz_trackid") or t.get("musicbrainz_recordingid"))
-                    else 0.0,
-                    "activeSource": "musicbrainz",
-                    "sourceCandidates": [],
-                    "cachedLookup": False,
-                    "matchedRelease": None,
-                    "availableReleases": [],
-                    "inMatchedReleaseTracklist": False,
-                    "matchedReleaseTrackPos": int(raw_track) if raw_track.isdigit() else None,
-                    "isRemixAlbumTrack": False,
-                    "detachedFromAlbum": False,
-                    "detachReason": None,
-                    "musicalKey": raw_key or "—",
-                    "camelotKey": raw_key or "—",
-                    "bpm": raw_bpm,
-                    "replayGainDb": None,
-                    "cover": {
-                        "status": "existing" if has_cover else "missing",
-                        "source": "Eingebettet" if has_cover else "Keine",
-                        "resolution": "Eingebettet" if has_cover else "—",
-                        "sizeKb": 0,
-                        "embeddedBefore": has_cover,
-                        "fallbackGradient": "from-slate-800 to-slate-900",
-                    },
-                    "lyrics": {
-                        "status": "missing",
-                        "source": "Keine",
-                        "syncedLrc": "",
-                        "plainText": "",
-                    },
-                    "isLooseFile": not raw_album and not source_dir,
-                    "manualAssignment": "none",
-                    "manualReleaseId": None,
-                    "pendingReRunTagAndMove": False,
-                    "status": "pending",
-                    "taggedAt": None,
-                    "movedToPath": None,
-                    "skippedInMode2Reason": None,
-                }
-            )
+                        "replayGainDb": None,
+                        "cover": {
+                            "status": "existing" if has_cover else "missing",
+                            "source": "Eingebettet" if has_cover else "Keine",
+                            "resolution": "Eingebettet" if has_cover else "—",
+                            "sizeKb": 0,
+                            "embeddedBefore": has_cover,
+                            "fallbackGradient": "from-slate-800 to-slate-900",
+                        },
+                        "lyrics": {
+                            "status": "missing",
+                            "source": "Keine",
+                            "syncedLrc": "",
+                            "plainText": "",
+                        },
+                        "isLooseFile": not raw_album and not source_dir,
+                        "manualAssignment": "none",
+                        "manualReleaseId": None,
+                        "pendingReRunTagAndMove": False,
+                        "status": "pending",
+                        "taggedAt": None,
+                        "movedToPath": None,
+                        "skippedInMode2Reason": None,
+                    }
+                )
 
+        if idx % 25 == 0 or idx == total_files:
+            if progress_cb:
+                progress_cb(idx, total_files, f"Scanne ({idx}/{total_files}): {fname}")
+            # GIL kurz freigeben, damit Web-UI & /api/health jederzeit sofort antworten
+            time.sleep(0.002)
+        if idx % 100 == 0 or idx == total_files:
+            print(
+                f"[TonArchiv] Scan: {idx}/{total_files} Dateien ({len(tracks)} Audio, {len(companions)} Begleit, {len(leftovers)} ignoriert)",
+                flush=True,
+            )
+        if idx % 200 == 0:
+            gc.collect()
+
+    gc.collect()
     return tracks, companions, leftovers
 
 
@@ -1257,12 +1403,15 @@ pause_event.set()
 active_task: Optional[asyncio.Task[Any]] = None
 
 
-def ensure_state_loaded(force_rescan: bool = False) -> Dict[str, Any]:
+def ensure_state_loaded(
+    force_rescan: bool = False,
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+) -> Dict[str, Any]:
     if not force_rescan:
         persisted = load_persisted_state()
         if persisted and isinstance(persisted.get("tracks"), list):
             return persisted
-    tracks, companions, leftovers = scan_music_directory()
+    tracks, companions, leftovers = scan_music_directory(progress_cb=progress_cb)
     state = {
         "tracks": tracks,
         "companions": companions,
@@ -1276,103 +1425,140 @@ def ensure_state_loaded(force_rescan: bool = False) -> Dict[str, Any]:
     return state
 
 
+def _update_scan_progress(scanned: int, total: int, label: str) -> None:
+    queue_state.processedCount = scanned
+    queue_state.totalCount = total
+    queue_state.currentTrackLabel = label
+
+
 async def _run_analyze_job(
     start_index: int = 0,
     cfg_override: Optional[Dict[str, Any]] = None,
     preloaded_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     global queue_state
-    cfg = {**build_server_config(), **(cfg_override or {})}
-    if preloaded_state is not None:
-        state = preloaded_state
-    else:
+    try:
+        cfg = {**build_server_config(), **(cfg_override or {})}
+        if preloaded_state is not None:
+            state = preloaded_state
+        else:
+            queue_state = QueueStatus(
+                activeMode="analyze",
+                status="running",
+                processedCount=0,
+                totalCount=0,
+                errorCount=0,
+                cacheHitCount=0,
+                etaSeconds=0,
+                currentTrackLabel=f"Scanne Musikordner ({MUSIC_DIR}) …",
+                checkpointIndex=start_index,
+                errors=[],
+            )
+            state = await asyncio.to_thread(
+                ensure_state_loaded, start_index == 0, _update_scan_progress
+            )
+
+        tracks: List[Dict[str, Any]] = state.get("tracks") or []
+
         queue_state = QueueStatus(
             activeMode="analyze",
             status="running",
             processedCount=start_index,
-            totalCount=0,
+            totalCount=len(tracks),
             errorCount=0,
             cacheHitCount=0,
-            etaSeconds=0,
-            currentTrackLabel=f"Scanne Musikordner ({MUSIC_DIR}) …",
+            etaSeconds=max(0, len(tracks) - start_index),
+            currentTrackLabel="",
             checkpointIndex=start_index,
             errors=[],
         )
-        state = await asyncio.to_thread(ensure_state_loaded, start_index == 0)
 
-    tracks: List[Dict[str, Any]] = state.get("tracks") or []
+        print(f"[TonArchiv] Modus 1 (Read-Only Analyse) gestartet fuer {len(tracks)} Tracks.", flush=True)
 
-    queue_state = QueueStatus(
-        activeMode="analyze",
-        status="running",
-        processedCount=start_index,
-        totalCount=len(tracks),
-        errorCount=0,
-        cacheHitCount=0,
-        etaSeconds=max(0, len(tracks) - start_index),
-        currentTrackLabel="",
-        checkpointIndex=start_index,
-        errors=[],
-    )
+        for idx in range(start_index, len(tracks)):
+            await pause_event.wait()
+            track = tracks[idx]
+            queue_state.currentTrackLabel = f"{track.get('artist', '')} — {track.get('title', '')}"
+            queue_state.etaSeconds = max(1, len(tracks) - idx)
 
-    for idx in range(start_index, len(tracks)):
-        await pause_event.wait()
-        track = tracks[idx]
-        queue_state.currentTrackLabel = f"{track.get('artist', '')} — {track.get('title', '')}"
-        queue_state.etaSeconds = max(1, len(tracks) - idx)
+            updated_track, hit, err_msg = await lookup_track_metadata(track, cfg)
+            tracks[idx] = updated_track
+            queue_state.processedCount = idx + 1
+            queue_state.checkpointIndex = idx + 1
+            if hit:
+                queue_state.cacheHitCount += 1
+            if err_msg:
+                queue_state.errorCount += 1
+                queue_state.errors.append(
+                    {
+                        "id": f"err-{idx}",
+                        "stage": "MusicBrainz",
+                        "trackLabel": track.get("fileName", ""),
+                        "message": err_msg,
+                        "recovered": True,
+                    }
+                )
+            await asyncio.to_thread(save_checkpoint, "analyze", idx + 1, len(tracks))
+            if (idx + 1) % 25 == 0 or idx + 1 == len(tracks):
+                state["tracks"] = tracks
+                await asyncio.to_thread(save_persisted_state, state)
+                print(
+                    f"[TonArchiv] Analyse: {idx + 1}/{len(tracks)} Tracks (Cache-Hits: {queue_state.cacheHitCount})",
+                    flush=True,
+                )
 
-        updated_track, hit, err_msg = await lookup_track_metadata(track, cfg)
-        tracks[idx] = updated_track
-        queue_state.processedCount = idx + 1
-        queue_state.checkpointIndex = idx + 1
-        if hit:
-            queue_state.cacheHitCount += 1
-        if err_msg:
-            queue_state.errorCount += 1
-            queue_state.errors.append(
-                {
-                    "id": f"err-{idx}",
-                    "stage": "MusicBrainz",
-                    "trackLabel": track.get("fileName", ""),
-                    "message": err_msg,
-                    "recovered": True,
-                }
-            )
-        save_checkpoint("analyze", idx + 1, len(tracks))
-        if (idx + 1) % 5 == 0 or idx + 1 == len(tracks):
-            state["tracks"] = tracks
-            save_persisted_state(state)
+        state["tracks"] = tracks
+        state["mode1Completed"] = True
+        await asyncio.to_thread(save_persisted_state, state)
+        await asyncio.to_thread(clear_checkpoint, "analyze")
 
-    state["tracks"] = tracks
-    state["mode1Completed"] = True
-    save_persisted_state(state)
-    clear_checkpoint("analyze")
-
-    queue_state.status = "completed"
-    queue_state.etaSeconds = 0
-    queue_state.currentTrackLabel = ""
+        queue_state.status = "completed"
+        queue_state.etaSeconds = 0
+        queue_state.currentTrackLabel = ""
+        print(f"[TonArchiv] Modus 1 abgeschlossen ({len(tracks)} Tracks).", flush=True)
+    except Exception as exc:
+        queue_state.status = "error"
+        queue_state.currentTrackLabel = f"Analyse-Fehler: {exc}"
+        print(f"[TonArchiv] Fehler in Modus 1: {exc}", flush=True)
 
 
 async def _startup_background_pipeline() -> None:
     global queue_state
     try:
-        persisted = load_persisted_state()
+        # Erst kurz warten, bis Uvicorn Port 7070 offen und Healthcheck gruen ist
+        await asyncio.sleep(2.5)
+        persisted = await asyncio.to_thread(load_persisted_state)
+        if persisted is not None:
+            print(
+                f"[TonArchiv] Bestehender Stand geladen ({len(persisted.get('tracks') or [])} Tracks).",
+                flush=True,
+            )
+
+        if not AUTO_ANALYZE_ON_START:
+            print(
+                "[TonArchiv] Web-UI aktiv (AUTO_ANALYZE_ON_START=false) — Scan/Modus 1 im Dashboard starten.",
+                flush=True,
+            )
+            return
+
+        if not _path_exists_safe(MUSIC_DIR):
+            print(
+                f"[TonArchiv] AUTO_ANALYZE_ON_START uebersprungen: MUSIC_DIR {MUSIC_DIR} nicht gefunden.",
+                flush=True,
+            )
+            return
+
         if persisted is None:
             queue_state = QueueStatus(
                 activeMode="analyze",
                 status="running",
                 currentTrackLabel=f"Scanne Musikordner ({MUSIC_DIR}) …",
             )
-            state = await asyncio.to_thread(ensure_state_loaded, False)
+            state = await asyncio.to_thread(ensure_state_loaded, False, _update_scan_progress)
         else:
             state = persisted
 
-        if (
-            AUTO_ANALYZE_ON_START
-            and MUSIC_DIR.exists()
-            and len(state.get("tracks") or []) > 0
-            and not state.get("mode1Completed")
-        ):
+        if len(state.get("tracks") or []) > 0 and not state.get("mode1Completed"):
             await _run_analyze_job(0, preloaded_state=state)
         elif queue_state.status == "running":
             queue_state.status = "idle"
@@ -1380,6 +1566,7 @@ async def _startup_background_pipeline() -> None:
     except Exception as exc:
         queue_state.status = "error"
         queue_state.currentTrackLabel = f"Startup-Scan fehlgeschlagen: {exc}"
+        print(f"[TonArchiv] Startup-Hintergrundfehler: {exc}", flush=True)
 
 
 def _execute_tag_entries(
@@ -1561,12 +1748,16 @@ class ModeRerunRequest(BaseModel):
 async def on_startup() -> None:
     global active_task
     init_cache_db()
-    # Scannen und Auto-Analyse asynchron im Hintergrund starten, damit Port 7070 sofort bereit ist
+    static_ok = (STATIC_DIR / "index.html").is_file()
+    print(
+        f"[TonArchiv] Bereit auf Port 7070 | Web-UI={static_ok} | MUSIC_DIR={MUSIC_DIR} (exists={_path_exists_safe(MUSIC_DIR)}) | AUTO_ANALYZE_ON_START={AUTO_ANALYZE_ON_START}",
+        flush=True,
+    )
     active_task = asyncio.create_task(_startup_background_pipeline())
 
 
 @app.get("/api/health")
-def api_health() -> Dict[str, Any]:
+async def api_health() -> Dict[str, Any]:
     journal = load_journal()
     return {
         "status": "ok",
@@ -1585,19 +1776,19 @@ def api_health() -> Dict[str, Any]:
 
 
 @app.get("/api/queue")
-def api_queue_status() -> Dict[str, Any]:
+async def api_queue_status() -> Dict[str, Any]:
     return asdict(queue_state)
 
 
 @app.post("/api/queue/pause")
-def api_queue_pause() -> Dict[str, Any]:
+async def api_queue_pause() -> Dict[str, Any]:
     pause_event.clear()
     queue_state.status = "paused"
     return asdict(queue_state)
 
 
 @app.post("/api/queue/resume")
-def api_queue_resume() -> Dict[str, Any]:
+async def api_queue_resume() -> Dict[str, Any]:
     pause_event.set()
     if queue_state.activeMode:
         queue_state.status = "running"
@@ -1606,7 +1797,7 @@ def api_queue_resume() -> Dict[str, Any]:
 
 @app.post("/api/rescan")
 async def api_rescan() -> Dict[str, Any]:
-    state = await asyncio.to_thread(ensure_state_loaded, True)
+    state = await asyncio.to_thread(ensure_state_loaded, True, _update_scan_progress)
     return {"rescanned": True, "trackCount": len(state.get("tracks") or [])}
 
 
@@ -1621,12 +1812,12 @@ def api_confirm_backup(req: BackupConfirmRequest) -> Dict[str, Any]:
 
 
 @app.get("/api/journal")
-def api_get_journal() -> Dict[str, Any]:
+async def api_get_journal() -> Dict[str, Any]:
     return load_journal()
 
 
 @app.get("/api/state")
-def api_get_state() -> Dict[str, Any]:
+async def api_get_state() -> Dict[str, Any]:
     journal = load_journal()
     state = load_persisted_state() or {
         "tracks": [],
@@ -1773,7 +1964,9 @@ if STATIC_DIR.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
     @app.get("/{full_path:path}")
-    def serve_spa(full_path: str) -> FileResponse:
+    async def serve_spa(full_path: str) -> FileResponse:
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API endpoint not found")
         candidate = STATIC_DIR / full_path
         if full_path and candidate.is_file():
             return FileResponse(candidate)

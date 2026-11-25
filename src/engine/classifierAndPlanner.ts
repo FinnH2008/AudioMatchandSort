@@ -1040,6 +1040,14 @@ export function computeNextModeAction(params: {
   }
 
   if (params.totalTracks === 0) {
+    if (params.backendConnected) {
+      return {
+        mode: 'analyze',
+        label: 'Modus 1: Bibliothek scannen & analysieren',
+        enabled: true,
+        blockReason: null,
+      };
+    }
     return {
       mode: 'analyze',
       label: 'Keine Dateien geladen',
