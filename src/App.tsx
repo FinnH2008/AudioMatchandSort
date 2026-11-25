@@ -179,7 +179,7 @@ export default function App() {
     setToastMessage(msg);
     window.setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? null : prev));
-    }, 2800);
+    }, 4500);
   }, []);
 
   const revokeCoverUrls = useCallback(() => {

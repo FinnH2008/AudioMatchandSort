@@ -457,6 +457,39 @@ export function LibraryView({
               )}
             </div>
           )}
+
+        {mode3Completed &&
+          backendConnected &&
+          queue.status !== 'running' &&
+          queue.status !== 'paused' && (
+            <div className="mt-4 pt-3.5 border-t border-[#243044] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-emerald-300">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <span>
+                  Sortierung abgeschlossen — verbleibende leere Alt-Ordner (z. B. mit verwaistem
+                  cover.jpg) kannst du hier direkt entfernen.
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={onCleanupEmptyDirs}
+                  className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300 whitespace-nowrap"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Leere Alt-Ordner aufräumen</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onRescanBackend}
+                  className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 font-medium hover:border-sky-400 whitespace-nowrap"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Ordner neu scannen</span>
+                </button>
+              </div>
+            </div>
+          )}
       </section>
 
       {/* Background Queue Monitor */}
