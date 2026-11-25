@@ -94,7 +94,7 @@ try:
 except Exception:
     ESSENTIA_AVAILABLE = False
 
-MUSIC_DIR = Path(os.getenv("MUSIC_DIR", "/srv/Music Full Quality")).resolve()
+MUSIC_DIR = Path(os.getenv("MUSIC_DIR", "/music")).resolve()
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "/config")).resolve()
 CACHE_DB_PATH = CONFIG_DIR / "cache.db"
 JOURNAL_PATH = CONFIG_DIR / "rollback.json"
@@ -102,8 +102,15 @@ STATE_PATH = CONFIG_DIR / "state.json"
 
 PUID = _env_int("PUID", 1000)
 PGID = _env_int("PGID", 1000)
-HOST_MUSIC_DIR = os.getenv("HOST_MUSIC_DIR", str(MUSIC_DIR))
+HOST_MUSIC_DIR = os.getenv("HOST_MUSIC_DIR", "/srv/Music Full Quality")
 AUTO_ANALYZE_ON_START = _env_bool("AUTO_ANALYZE_ON_START", True)
+
+
+def _path_exists_safe(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 CONFIDENCE_THRESHOLD = _env_float("CONFIDENCE_THRESHOLD", 0.80)
 MIN_LOSSY_BITRATE = _env_int("MIN_LOSSY_BITRATE", 256)
@@ -296,25 +303,8 @@ def safe_resolve_under_music(rel_path: str) -> Path:
 # ---------------------------------------------------------------------------
 # 2. Persistenter SQLite-Cache & Fortschritts-Checkpoints
 # ---------------------------------------------------------------------------
-def init_cache_db() -> None:
-    global CONFIG_DIR, CACHE_DB_PATH, JOURNAL_PATH, STATE_PATH
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        probe = CONFIG_DIR / ".write_probe"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
-    except OSError as exc:
-        print(
-            f"[TonArchiv] Warnung: CONFIG_DIR={CONFIG_DIR} nicht beschreibbar ({exc}) — weiche auf /tmp/tonarchiv-config aus.",
-            flush=True,
-        )
-        CONFIG_DIR = Path("/tmp/tonarchiv-config")
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CACHE_DB_PATH = CONFIG_DIR / "cache.db"
-        JOURNAL_PATH = CONFIG_DIR / "rollback.json"
-        STATE_PATH = CONFIG_DIR / "state.json"
-
-    with sqlite3.connect(CACHE_DB_PATH) as conn:
+def _create_cache_tables(db_path: Path) -> None:
+    with sqlite3.connect(db_path, timeout=10.0) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS lookup_cache (
@@ -337,6 +327,27 @@ def init_cache_db() -> None:
             """
         )
         conn.commit()
+
+
+def init_cache_db() -> None:
+    global CONFIG_DIR, CACHE_DB_PATH, JOURNAL_PATH, STATE_PATH
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        probe = CONFIG_DIR / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        _create_cache_tables(CACHE_DB_PATH)
+    except (OSError, sqlite3.Error) as exc:
+        print(
+            f"[TonArchiv] Warnung: CONFIG_DIR={CONFIG_DIR} nicht nutzbar ({exc}) — weiche auf /tmp/tonarchiv-config aus.",
+            flush=True,
+        )
+        CONFIG_DIR = Path("/tmp/tonarchiv-config")
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CACHE_DB_PATH = CONFIG_DIR / "cache.db"
+        JOURNAL_PATH = CONFIG_DIR / "rollback.json"
+        STATE_PATH = CONFIG_DIR / "state.json"
+        _create_cache_tables(CACHE_DB_PATH)
 
 
 def cache_get(namespace: str, cache_key: str) -> Optional[Dict[str, Any]]:
@@ -1560,7 +1571,7 @@ def api_health() -> Dict[str, Any]:
     return {
         "status": "ok",
         "music_dir": str(MUSIC_DIR),
-        "music_dir_exists": MUSIC_DIR.exists(),
+        "music_dir_exists": _path_exists_safe(MUSIC_DIR),
         "essentia_available": ESSENTIA_AVAILABLE,
         "acoustid_configured": bool(ACOUSTID_API_KEY),
         "discogs_configured": bool(DISCOGS_TOKEN),

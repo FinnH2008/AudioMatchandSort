@@ -547,11 +547,12 @@ test('Compilation release matcher searches exclusively compilation releases and 
   assert.equal(picked?.isCompilation, true);
 
   const bundle = generateDockerBundle(DEFAULT_CONFIG, 'ghcr.io/meinuser/tonarchiv:latest');
-  assert.equal(bundle.length, 9);
+  assert.equal(bundle.length, 10);
   const compose = bundle.find((f) => f.filename === 'docker-compose.yml')!.content;
   assert.ok(compose.includes('${TONARCHIV_IMAGE:-ghcr.io/meinuser/tonarchiv:latest}'));
   assert.ok(compose.includes('pull_policy: always'));
   assert.ok(compose.includes('AUTO_ANALYZE_ON_START'));
+  assert.ok(compose.includes('tonarchiv_config:/config'));
   assert.ok(compose.includes('${TONARCHIV_PORT:-7070}:7070'));
   assert.equal(compose.includes('env_file:'), false);
   assert.equal(compose.includes('build:'), false);
@@ -562,7 +563,9 @@ test('Compilation release matcher searches exclusively compilation releases and 
   assert.ok(dockerfile.includes('COPY package.json package-lock.json* .npmrc* ./'));
   assert.ok(dockerfile.includes('--legacy-peer-deps'));
   assert.ok(dockerfile.includes('EXPOSE 7070'));
-  assert.ok(dockerfile.includes('--port 7070'));
+  assert.ok(dockerfile.includes('ENTRYPOINT ["/app/entrypoint.sh"]'));
+  const entrypoint = bundle.find((f) => f.filename === 'backend/entrypoint.sh')!.content;
+  assert.ok(entrypoint.includes('--port 7070'));
   const npmrc = bundle.find((f) => f.filename === '.npmrc')!.content;
   assert.ok(npmrc.includes('legacy-peer-deps=true'));
   const envEx = bundle.find((f) => f.filename === '.env.example')!.content;

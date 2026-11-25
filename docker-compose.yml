@@ -1,6 +1,6 @@
 services:
   tonarchiv:
-    # Vorgebautes Multi-Arch Image (AMD64 + ARM64) direkt pullen — kein lokaler Build / npm install noetig.
+    # Direkt in Portainer (Web Editor oder Git) einfuegbar — pullt das fertige Multi-Arch-Image automatisch.
     image: "${TONARCHIV_IMAGE:-ghcr.io/finnh2008/audiomatchandsort:latest}"
     pull_policy: always
     container_name: tonarchiv
@@ -11,8 +11,8 @@ services:
       # --- Benutzerrechte & Pfade (wichtig fuer NAS/SMB) ---
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
-      MUSIC_DIR: "${MUSIC_DIR:-/srv/Music Full Quality}"
-      CONFIG_DIR: "${CONFIG_DIR:-/config}"
+      MUSIC_DIR: "/music"
+      CONFIG_DIR: "/config"
 
       # --- Autostart (Read-Only Analyse startet direkt beim Container-Start) ---
       AUTO_ANALYZE_ON_START: "${AUTO_ANALYZE_ON_START:-true}"
@@ -51,6 +51,9 @@ services:
       CLEANUP_EMPTY_DIRS: "${CLEANUP_EMPTY_DIRS:-true}"
     volumes:
       # WICHTIG: Genau ein einzelner Mount fuer atomares Verschieben im selben Dateisystem
-      - "${HOST_MUSIC_DIR:-/srv/Music Full Quality}:${MUSIC_DIR:-/srv/Music Full Quality}"
-      # Persistente SQLite-Cache-DB (cache.db), State und atomares Journal (rollback.json)
-      - "${HOST_CONFIG_DIR:-./config}:${CONFIG_DIR:-/config}"
+      - "${HOST_MUSIC_DIR:-/srv/Music Full Quality}:/music"
+      # Benanntes Docker-Volume: funktioniert in Portainer Web Editor & Git ohne lokalen ./config-Ordner
+      - "tonarchiv_config:/config"
+
+volumes:
+  tonarchiv_config:

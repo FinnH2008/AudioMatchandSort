@@ -27,8 +27,8 @@ export function generateDockerBundle(
     environment:
       PUID: "\${PUID:-${config.puid}}"
       PGID: "\${PGID:-${config.pgid}}"
-      MUSIC_DIR: "\${MUSIC_DIR:-${config.containerMusicDir}}"
-      CONFIG_DIR: "\${CONFIG_DIR:-${config.configDir}}"
+      MUSIC_DIR: "/music"
+      CONFIG_DIR: "/config"
       AUTO_ANALYZE_ON_START: "\${AUTO_ANALYZE_ON_START:-true}"
       ACOUSTID_API_KEY: "\${ACOUSTID_API_KEY:-}"
       DISCOGS_TOKEN: "\${DISCOGS_TOKEN:-}"
@@ -54,9 +54,12 @@ export function generateDockerBundle(
       CLEANUP_EMPTY_DIRS: "\${CLEANUP_EMPTY_DIRS:-${config.cleanupEmptyDirs ? 'true' : 'false'}}"
     volumes:
       # WICHTIG: Genau ein einzelner Mount fuer atomares Verschieben im selben Dateisystem
-      - "\${HOST_MUSIC_DIR:-${config.hostMusicDir}}:\${MUSIC_DIR:-${config.containerMusicDir}}"
-      # Persistente SQLite-Cache-DB (cache.db), State und atomares Journal (rollback.json)
-      - "\${HOST_CONFIG_DIR:-./config}:\${CONFIG_DIR:-${config.configDir}}"
+      - "\${HOST_MUSIC_DIR:-${config.hostMusicDir}}:/music"
+      # Benanntes Docker-Volume: funktioniert direkt in Portainer Web Editor ohne ./config-Pfad
+      - "tonarchiv_config:/config"
+
+volumes:
+  tonarchiv_config:
 `;
 
   const dockerComposeBuild = `# Optionales Override fuer lokalen Build statt GHCR-Pull:
@@ -157,15 +160,16 @@ RUN if [ "$INSTALL_ESSENTIA" = "true" ]; then \\
     fi
 
 COPY backend/app.py /app/app.py
+COPY backend/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 COPY --from=frontend-builder /ui/dist /app/static
 
 EXPOSE 7070
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \\
-  CMD curl -fsS http://127.0.0.1:7070/api/health || exit 1
+  CMD curl -fsS --noproxy '*' http://127.0.0.1:7070/api/health || exit 1
 
-# Startet als konfigurierte PUID/PGID (mit Fallback, falls NAS-Mount chown blockiert)
-ENTRYPOINT ["/bin/sh", "-c", "CFG=\\"\${CONFIG_DIR:-${config.configDir}}\\"; UID_NUM=\\"\${PUID:-${config.puid}}\\"; GID_NUM=\\"\${PGID:-${config.pgid}}\\"; mkdir -p \\"$CFG\\" 2>/dev/null || true; chown -R \\"$UID_NUM:$GID_NUM\\" \\"$CFG\\" 2>/dev/null || true; echo \\"[TonArchiv] Starte FastAPI auf Port 7070 (CONFIG=$CFG, UID=$UID_NUM:$GID_NUM)\\"; if gosu \\"$UID_NUM:$GID_NUM\\" test -w \\"$CFG\\" 2>/dev/null; then exec gosu \\"$UID_NUM:$GID_NUM\\" uvicorn app:app --app-dir /app --host 0.0.0.0 --port 7070 --proxy-headers --log-level info; else echo \\"[TonArchiv] Warnung: $CFG fuer $UID_NUM:$GID_NUM nicht beschreibbar — starte ohne UID-Wechsel\\"; exec uvicorn app:app --app-dir /app --host 0.0.0.0 --port 7070 --proxy-headers --log-level info; fi"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 `;
 
   const requirementsTxt = `fastapi>=0.115.0
@@ -690,9 +694,36 @@ Trage beide Werte in \`.env\` ein. Der Container startet den FastAPI-Prozess dir
       content: appPy,
     },
     {
+      filename: 'backend/entrypoint.sh',
+      language: 'text',
+      description: 'Startskript fuer PUID/PGID, Schreibrechte-Fallback und FastAPI/Uvicorn auf Port 7070',
+      content: `#!/bin/sh
+set -u
+
+CFG="\${CONFIG_DIR:-/config}"
+MDIR="\${MUSIC_DIR:-/music}"
+UID_NUM="$(printf '%s' "\${PUID:-1000}" | tr -d '[:space:]')"
+GID_NUM="$(printf '%s' "\${PGID:-1000}" | tr -d '[:space:]')"
+
+case "$UID_NUM" in ''|*[!0-9]*) UID_NUM=1000 ;; esac
+case "$GID_NUM" in ''|*[!0-9]*) GID_NUM=1000 ;; esac
+
+mkdir -p "$CFG" 2>/dev/null || true
+chown -R "$UID_NUM:$GID_NUM" "$CFG" 2>/dev/null || true
+
+export HOME="/tmp"
+
+if [ "$UID_NUM" != "0" ] && command -v gosu >/dev/null 2>&1 && gosu "$UID_NUM:$GID_NUM" test -w "$CFG" 2>/dev/null; then
+  exec gosu "$UID_NUM:$GID_NUM" python -m uvicorn app:app --app-dir /app --host 0.0.0.0 --port 7070 --proxy-headers --log-level info
+else
+  exec python -m uvicorn app:app --app-dir /app --host 0.0.0.0 --port 7070 --proxy-headers --log-level info
+fi
+`,
+    },
+    {
       filename: 'backend/requirements.txt',
       language: 'text',
-      description: 'Python-Abhängigkeiten für FastAPI, Mutagen, MusicBrainz, AcoustID, Discogs, SyncedLyrics & ShazamIO',
+      description: 'Schlanke Python-Abhängigkeiten (FastAPI, Uvicorn, Pydantic, Mutagen, Requests, Pillow)',
       content: requirementsTxt,
     },
     {
