@@ -467,79 +467,82 @@ export function LibraryView({
           backendConnected &&
           queue.status !== 'running' &&
           queue.status !== 'paused' && (
-            <div className="mt-4 pt-3.5 border-t border-[#243044] space-y-3 text-xs">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-2 text-emerald-300">
-                  <CheckCircle2 className="h-4 w-4 shrink-0" />
-                  <span>
-                    {pendingReRunTracks.length > 0
-                      ? `${pendingReRunTracks.length} Tracks per Musik-ID / manuell korrigiert — jetzt neu taggen & einsortieren.`
-                      : 'Sortierung abgeschlossen — verbleibende Alt-Ordner aufräumen oder Dateien nachträglich per Musik-ID (Audio-Fingerprint) exakt nach-taggen.'}
-                  </span>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  {pendingReRunTracks.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={onTriggerPendingReRun}
-                      className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md bg-emerald-400 text-slate-950 font-semibold hover:bg-emerald-300 whitespace-nowrap"
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      <span>Geänderte schreiben &amp; sortieren ({pendingReRunTracks.length})</span>
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={onCleanupEmptyDirs}
-                    className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300 whitespace-nowrap"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    <span>Leere Alt-Ordner aufräumen</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onRescanBackend}
-                    className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 font-medium hover:border-sky-400 whitespace-nowrap"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    <span>Ordner neu scannen</span>
-                  </button>
-                </div>
+            <div className="mt-4 pt-3.5 border-t border-[#243044] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-emerald-300">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <span>
+                  {pendingReRunTracks.length > 0
+                    ? `${pendingReRunTracks.length} Tracks per Musik-ID / manuell korrigiert — jetzt neu taggen & einsortieren.`
+                    : 'Sortierung abgeschlossen — verbleibende Alt-Ordner aufräumen oder Dateien nachträglich per Musik-ID (Audio-Fingerprint) exakt nach-taggen.'}
+                </span>
               </div>
-
-              {/* Post-Hoc Musik-ID (Audio-Fingerprint) Nach-Tagging Bar */}
-              <div className="pt-3 border-t border-[#243044]/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                <div className="flex items-center gap-2 text-slate-300">
-                  <AudioWaveform className="h-4 w-4 text-sky-400 shrink-0" />
-                  <span>
-                    <strong className="text-slate-100">Nach-Taggen mit echter Musik-ID:</strong>{' '}
-                    Erkennt Songs direkt am Audiosignal (ignoriert falsche Tags ·{' '}
-                    {config.shazamioAvailable ? 'ShazamIO aktiv' : 'ShazamIO optional'}
-                    {config.acoustidKeyConfigured ? ' + AcoustID aktiv' : ''}).
-                  </span>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  {report.reviewLosslessCount + report.reviewLossyCount > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => onRetagWithAudioId({ scope: 'review' })}
-                      className="flex-1 sm:flex-none min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md border border-sky-400/50 bg-sky-400/10 text-sky-200 font-medium hover:bg-sky-400/20 whitespace-nowrap"
-                    >
-                      <AudioWaveform className="h-3.5 w-3.5" />
-                      <span>
-                        _Review mit Musik-ID ({report.reviewLosslessCount + report.reviewLossyCount})
-                      </span>
-                    </button>
-                  )}
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {pendingReRunTracks.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => onRetagWithAudioId({ scope: 'all' })}
-                    className="flex-1 sm:flex-none min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 font-medium hover:border-sky-400 whitespace-nowrap"
+                    onClick={onTriggerPendingReRun}
+                    className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md bg-emerald-400 text-slate-950 font-semibold hover:bg-emerald-300 whitespace-nowrap"
+                  >
+                    <Play className="h-3.5 w-3.5" />
+                    <span>Geänderte schreiben &amp; sortieren ({pendingReRunTracks.length})</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onCleanupEmptyDirs}
+                  className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md bg-sky-400 text-slate-950 font-semibold hover:bg-sky-300 whitespace-nowrap"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Leere Alt-Ordner aufräumen</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onRescanBackend}
+                  className="flex-1 sm:flex-none min-h-[42px] inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 font-medium hover:border-sky-400 whitespace-nowrap"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Ordner neu scannen</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+        {/* Post-Hoc Musik-ID (Audio-Fingerprint) Nach-Tagging Bar — immer sichtbar sobald Tracks im Docker-Backend geladen sind */}
+        {tracks.length > 0 &&
+          backendConnected &&
+          queue.status !== 'running' &&
+          queue.status !== 'paused' && (
+            <div className="mt-4 pt-3.5 border-t border-[#243044] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+              <div className="flex items-center gap-2 text-slate-300">
+                <AudioWaveform className="h-4 w-4 text-sky-400 shrink-0" />
+                <span>
+                  <strong className="text-slate-100">Nach-Taggen mit echter Musik-ID:</strong>{' '}
+                  Erkennt Songs direkt am Audiosignal (ignoriert falsche Tags ·{' '}
+                  {config.shazamioAvailable ? 'ShazamIO aktiv' : 'ShazamIO optional'}
+                  {config.acoustidKeyConfigured ? ' + AcoustID aktiv' : ''}).
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {report.reviewLosslessCount + report.reviewLossyCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => onRetagWithAudioId({ scope: 'review' })}
+                    className="flex-1 sm:flex-none min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md border border-sky-400/50 bg-sky-400/10 text-sky-200 font-medium hover:bg-sky-400/20 whitespace-nowrap"
                   >
                     <AudioWaveform className="h-3.5 w-3.5" />
-                    <span>Alle per Musik-ID prüfen ({tracks.length})</span>
+                    <span>
+                      _Review mit Musik-ID ({report.reviewLosslessCount + report.reviewLossyCount})
+                    </span>
                   </button>
-                </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onRetagWithAudioId({ scope: 'all' })}
+                  className="flex-1 sm:flex-none min-h-[40px] inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md border border-[#243044] bg-[#0F172A] text-slate-200 font-medium hover:border-sky-400 whitespace-nowrap"
+                >
+                  <AudioWaveform className="h-3.5 w-3.5" />
+                  <span>Alle per Musik-ID prüfen ({tracks.length})</span>
+                </button>
               </div>
             </div>
           )}
@@ -1038,6 +1041,15 @@ export function LibraryView({
                       </span>
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => onRetagWithAudioId({ scope: 'all' })}
+                    disabled={queue.status === 'running' || queue.status === 'paused'}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded border border-[#243044] bg-[#0F172A] text-slate-200 hover:border-sky-400 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <AudioWaveform className="h-3.5 w-3.5" />
+                    <span>Alle per Musik-ID ({tracks.length})</span>
+                  </button>
                   <button
                     type="button"
                     onClick={onCleanupEmptyDirs}
